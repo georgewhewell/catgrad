@@ -56,7 +56,7 @@
           ++ pkgs.lib.optionals withCuda cudaInputs;
 
         CUDA_COMPUTE_CAP = pkgs.lib.optionalString withCuda cudaCapability;
-        CUDA_TOOLKIT_ROOT_DIR = pkgs.lib.optionalString withCuda pkgs.lib.getDev cudaPackages.cuda_cudart;
+        CUDA_TOOLKIT_ROOT_DIR = pkgs.lib.optionalString withCuda (pkgs.lib.getDev cudaPackages.cuda_cudart);
 
         doCheck = !withCuda;
 
