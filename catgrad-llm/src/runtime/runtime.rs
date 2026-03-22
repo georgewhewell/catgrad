@@ -80,4 +80,8 @@ impl<B: interpreter::Backend> Runtime<B> {
             interpreter,
         ))
     }
+
+    pub fn backend(&self) -> &B {
+        &self.backend
+    }
 }

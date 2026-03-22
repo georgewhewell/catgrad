@@ -2,11 +2,11 @@ use anyhow::Result;
 use catgrad::interpreter::backend::candle::CandleBackend;
 use catgrad::interpreter::backend::ndarray::NdArrayBackend;
 use catgrad::prelude::*;
-use catgrad_llm::helpers::LLMModel;
+use catgrad_llm::{Program, ProgramInterface, Runtime};
 use catgrad_llm::utils::{
     cache_path_for_embeddings, get_model, get_model_chat_template, load_and_preprocess_image,
-    load_cached_embeddings, load_model, post_process_model_weights, print_bench_table,
-    render_chat_template, save_cached_embeddings,
+    load_cached_embeddings, load_model, print_bench_table, render_chat_template,
+    save_cached_embeddings,
 };
 use clap::{Parser, ValueEnum};
 use serde::Deserialize;
@@ -159,7 +159,7 @@ fn run_with_backend<B: interpreter::Backend>(
     let model_name = get_model_name(args, app_config)?;
 
     let start_load = std::time::Instant::now();
-    let (mut parameter_values, mut parameter_types, config_json, tokenizer, total_params) =
+    let (parameter_values, parameter_types, config_json, tokenizer, total_params) =
         load_model(&model_name, &args.revision, &backend)?;
     let elapsed_load = start_load.elapsed();
 
@@ -222,12 +222,6 @@ fn run_with_backend<B: interpreter::Backend>(
 
     let max_sequence_length = max_seq_len + token_ids.len();
     let model = get_model(&config_json, max_sequence_length)?;
-    post_process_model_weights(
-        model.as_ref(),
-        &backend,
-        &mut parameter_values,
-        &mut parameter_types,
-    )?;
 
     let mm_metadata = if use_image {
         Some(
@@ -239,7 +233,7 @@ fn run_with_backend<B: interpreter::Backend>(
         None
     };
 
-    let typed_term = if let Some(load_path) = &args.load {
+    let program = if let Some(load_path) = &args.load {
         let file = std::fs::File::open(load_path)?;
         serde_json::from_reader(file)?
     } else if use_image {
@@ -249,50 +243,49 @@ fn run_with_backend<B: interpreter::Backend>(
                 model_name
             )
         })?;
-        language_model
-            .term()
-            .ok_or_else(|| anyhow::anyhow!("Failed to create multimodal typed term"))?
+        Program::from_module(
+            language_model.as_ref(),
+            ProgramInterface::Raw,
+            catgrad::prelude::Path::empty(),
+            model.empty_state_type(),
+            max_sequence_length,
+            model.weight_post_process(),
+        )?
     } else {
-        model.term().expect("Failed to create typed term")
+        Program::text_from_config(&config_json, max_sequence_length)?
     };
 
     if let Some(dump_path) = &args.dump {
         let file = std::fs::File::create(dump_path)?;
-        serde_json::to_writer_pretty(file, &typed_term)?;
+        serde_json::to_writer_pretty(file, &program)?;
         eprintln!(
-            "Graph for {} and max_seq_length of {max_sequence_length} dumped to {}",
+            "Program for {} and max_seq_length of {max_sequence_length} dumped to {}",
             model.path(),
             dump_path.display()
         );
         return Ok(());
     }
 
-    // Get stdlib environment and extend with parameter declarations
-    let mut env = stdlib();
-    let load_prefix = if use_image {
-        catgrad::prelude::Path::empty()
-    } else {
-        model.path()
-    };
-    env.declarations
-        .extend(to_load_ops(load_prefix, parameter_types.keys()));
-
-    // Shapecheck the model
-    if args.typecheck {
-        typecheck::check(&env, &parameter_types, typed_term.clone())
-            .map_err(|err| anyhow::anyhow!("check error {:?}", err))?;
-    }
-
     let mut generated_tokens = 0;
     let mut start_gen = std::time::Instant::now();
     let mut elapsed_pp = std::time::Duration::ZERO;
-    let interpreter = interpreter::Interpreter::new(backend, env, parameter_values);
+    let runtime = Runtime::new(backend, &program, parameter_values, parameter_types)?;
+    let bound_program = runtime.bind(program)?;
 
     let mut multimodal_ctx: Option<MultimodalRuntime<B>> = None;
     if let Some(mm) = mm_metadata {
         let vision_model = model.multimodal_vision_module().ok_or_else(|| {
             anyhow::anyhow!("Model {} does not provide vision module", model_name)
         })?;
+        let vision_program = Program::from_module(
+            vision_model.as_ref(),
+            ProgramInterface::Raw,
+            catgrad::prelude::Path::empty(),
+            vec![],
+            0,
+            model.weight_post_process(),
+        )?;
+        let bound_vision = runtime.bind(vision_program)?;
         let image_path = args
             .image
             .as_ref()
@@ -307,24 +300,24 @@ fn run_with_backend<B: interpreter::Backend>(
                 cache_path.display()
             );
             interpreter::tensor(
-                &interpreter.backend,
+                runtime.backend(),
                 Shape(vec![1, mm.mm_tokens_per_image, mm.hidden_size]),
                 cached,
             )
             .map_err(|e| anyhow::anyhow!("BackendError: {:?}", e))?
         } else {
-            let image_tensor =
-                interpreter::tensor(&interpreter.backend, Shape(image_shape), image_data)
-                    .map_err(|e| anyhow::anyhow!("BackendError: {:?}", e))?;
-            let vision_term = vision_model
-                .term()
-                .ok_or_else(|| anyhow::anyhow!("failed to build vision model term"))?;
-            let results = interpreter.run(vision_term.term, vec![image_tensor])?;
-            let visual_embeddings = results
-                .first()
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("Vision model returned no outputs"))?;
-            let flattened = to_f32_vec(&interpreter.backend, &visual_embeddings)?;
+            let image_tensor = interpreter::tensor(runtime.backend(), Shape(image_shape), image_data)
+                .map_err(|e| anyhow::anyhow!("BackendError: {:?}", e))?;
+            let mut vision_session = bound_vision.start(bound_vision.empty_snapshot())?;
+            let mut results = vision_session.run_raw(vec![image_tensor])?;
+            if results.len() != 1 {
+                return Err(anyhow::anyhow!(
+                    "Vision program returned {} non-state outputs",
+                    results.len()
+                ));
+            }
+            let visual_embeddings = results.remove(0);
+            let flattened = to_f32_vec(runtime.backend(), &visual_embeddings)?;
             save_cached_embeddings(&cache_path, &flattened)?;
             eprintln!("Saved image features to: {}", cache_path.display());
             visual_embeddings
@@ -339,27 +332,35 @@ fn run_with_backend<B: interpreter::Backend>(
 
     let eos_token_ids = model.config().get_eos_token_ids();
 
-    let mut state_cache = empty_state_cache(&interpreter.backend, model)?;
     let use_kv_cache = args.kv_cache || use_image;
+    let empty_snapshot = bound_program.empty_snapshot();
+    let mut snapshot = empty_snapshot.clone();
     let mut use_image_embeddings = use_image;
 
     // Run inference loop
     for i in 0..max_seq_len {
-        let decode_inputs = if let Some(ctx) = multimodal_ctx.as_ref() {
-            DecodeInputs::Multimodal {
-                input_tokens: &token_ids,
-                hidden_size: ctx.hidden_size,
-                image_token_index: ctx.image_token_index,
-                visual_embeddings: &ctx.visual_embeddings,
+        let mut session = bound_program.start(snapshot)?;
+        let next_token_id = if let Some(ctx) = multimodal_ctx.as_ref() {
+            let outputs = session.run_raw(build_multimodal_inputs(
+                runtime.backend(),
+                &token_ids,
+                ctx.hidden_size,
+                ctx.image_token_index,
+                &ctx.visual_embeddings,
                 use_image_embeddings,
+            )?)?;
+            let mut outputs = outputs;
+            if outputs.len() != 1 {
+                return Err(anyhow::anyhow!(
+                    "Language program returned {} non-state outputs",
+                    outputs.len()
+                ));
             }
+            extract_generated_token(runtime.backend(), outputs.remove(0))?
         } else {
-            DecodeInputs::Text {
-                input_tokens: &token_ids,
-            }
+            session.step_text(&token_ids)?
         };
-        let (next_token_id, updated_state_cache) =
-            run_interpreter(&typed_term, &interpreter, decode_inputs, &state_cache)?;
+        let next_snapshot = session.into_snapshot();
         if i == 0 {
             elapsed_pp = start_gen.elapsed();
             start_gen = std::time::Instant::now();
@@ -369,9 +370,10 @@ fn run_with_backend<B: interpreter::Backend>(
             break;
         }
         if use_kv_cache {
-            state_cache = updated_state_cache;
+            snapshot = next_snapshot;
             token_ids = vec![next_token_id];
         } else {
+            snapshot = empty_snapshot.clone();
             token_ids.push(next_token_id);
         }
         if use_image && use_kv_cache {
@@ -415,30 +417,6 @@ fn run_with_backend<B: interpreter::Backend>(
     Ok(())
 }
 
-// Model-specific empty state cache.
-// Usually just KV-cache but for hybrid models it can include additional state from the linear layers.
-fn empty_state_cache<B: interpreter::Backend>(
-    backend: &B,
-    model: Box<dyn LLMModel>,
-) -> Result<Vec<interpreter::Value<B>>> {
-    let typ = model.empty_state_type();
-
-    typ.iter()
-        .map(|(dtype, shape)| match dtype {
-            Dtype::F32 => {
-                let data = vec![0.0f32; shape.0.iter().product()];
-                interpreter::tensor(backend, shape.clone(), data)
-                    .map_err(|err| anyhow::anyhow!("state tensor error: {:?}", err))
-            }
-            Dtype::U32 => {
-                let data = vec![0u32; shape.0.iter().product()];
-                interpreter::tensor(backend, shape.clone(), data)
-                    .map_err(|err| anyhow::anyhow!("state tensor error: {:?}", err))
-            }
-        })
-        .collect()
-}
-
 fn to_f32_vec<B: interpreter::Backend>(
     backend: &B,
     value: &interpreter::Value<B>,
@@ -458,120 +436,74 @@ struct MultimodalRuntime<B: interpreter::Backend> {
     visual_embeddings: interpreter::Value<B>,
 }
 
-enum DecodeInputs<'a, B: interpreter::Backend> {
-    Text {
-        input_tokens: &'a [u32],
-    },
-    Multimodal {
-        input_tokens: &'a [u32],
-        hidden_size: usize,
-        image_token_index: usize,
-        visual_embeddings: &'a interpreter::Value<B>,
-        use_image_embeddings: bool,
-    },
-}
-
-fn run_interpreter<B: interpreter::Backend>(
-    typed_term: &TypedTerm,
-    interpreter: &interpreter::Interpreter<B>,
-    decode_inputs: DecodeInputs<'_, B>,
-    state_cache: &[interpreter::Value<B>],
-) -> Result<(u32, Vec<interpreter::Value<B>>)> {
-    let mut inputs = Vec::with_capacity(state_cache.len() + 3);
-
-    match decode_inputs {
-        DecodeInputs::Text { input_tokens } => {
-            let input_tensor = interpreter::tensor(
-                &interpreter.backend,
-                Shape(vec![1, input_tokens.len()]),
-                input_tokens.to_vec(),
-            )
-            .map_err(|err| anyhow::anyhow!("input tensor error: {:?}", err))?;
-            inputs.push(input_tensor);
-        }
-        DecodeInputs::Multimodal {
-            input_tokens,
-            hidden_size,
-            image_token_index,
-            visual_embeddings,
-            use_image_embeddings,
-        } => {
-            let empty_image_embeddings = interpreter::tensor(
-                &interpreter.backend,
-                Shape(vec![1, 0, hidden_size]),
-                Vec::<f32>::new(),
-            )
-            .map_err(|err| anyhow::anyhow!("empty image tensor error: {:?}", err))?;
-
-            let (text_before_tokens, text_after_tokens) = if use_image_embeddings {
-                let first_image_token_index = input_tokens
-                    .iter()
-                    .position(|&x| x == image_token_index as u32)
-                    .unwrap_or(0);
-                let last_image_token_index = input_tokens
-                    .iter()
-                    .rposition(|&x| x == image_token_index as u32)
-                    .unwrap_or(0);
-                (
-                    &input_tokens[..first_image_token_index],
-                    &input_tokens[last_image_token_index + 1..],
-                )
-            } else {
-                (&[][..], input_tokens)
-            };
-
-            let text_before = interpreter::tensor(
-                &interpreter.backend,
-                Shape(vec![1, text_before_tokens.len()]),
-                text_before_tokens.to_vec(),
-            )
-            .map_err(|err| anyhow::anyhow!("text_before tensor error: {:?}", err))?;
-            let text_after = interpreter::tensor(
-                &interpreter.backend,
-                Shape(vec![1, text_after_tokens.len()]),
-                text_after_tokens.to_vec(),
-            )
-            .map_err(|err| anyhow::anyhow!("text_after tensor error: {:?}", err))?;
-            let image_embeddings = if use_image_embeddings {
-                visual_embeddings.clone()
-            } else {
-                empty_image_embeddings
-            };
-
-            inputs.push(text_before);
-            inputs.push(image_embeddings);
-            inputs.push(text_after);
-        }
-    }
-
-    inputs.extend(state_cache.iter().cloned());
-
-    // Run the model
-    let mut results = interpreter
-        .run(typed_term.term.clone(), inputs)
-        .expect("Failed to run inference");
-
-    if results.is_empty() {
-        return Err(anyhow::anyhow!("model returned no outputs"));
-    }
-    let updated_state_cache = if results.len() > 1 {
-        results.split_off(1)
-    } else {
-        Vec::new()
-    };
-    let output = results.remove(0);
-
+fn extract_generated_token<B: interpreter::Backend>(
+    backend: &B,
+    output: interpreter::Value<B>,
+) -> Result<u32> {
     match output {
-        interpreter::Value::Tensor(arr) => match interpreter.backend.to_vec(arr) {
+        interpreter::Value::Tensor(arr) => match backend.to_vec(arr) {
             interpreter::TaggedVec::U32(v) => {
                 let token = v
                     .last()
                     .copied()
                     .ok_or_else(|| anyhow::anyhow!("token output tensor was empty"))?;
-                Ok((token, updated_state_cache))
+                Ok(token)
             }
             _ => Err(anyhow::anyhow!("Unexpected output dtype")),
         },
         t => Err(anyhow::anyhow!("Output was not a tensor: {:?}", t)),
     }
+}
+
+fn build_multimodal_inputs<B: interpreter::Backend>(
+    backend: &B,
+    input_tokens: &[u32],
+    hidden_size: usize,
+    image_token_index: usize,
+    visual_embeddings: &interpreter::Value<B>,
+    use_image_embeddings: bool,
+) -> Result<Vec<interpreter::Value<B>>> {
+    let empty_image_embeddings = interpreter::tensor(
+        backend,
+        Shape(vec![1, 0, hidden_size]),
+        Vec::<f32>::new(),
+    )
+    .map_err(|err| anyhow::anyhow!("empty image tensor error: {:?}", err))?;
+
+    let (text_before_tokens, text_after_tokens) = if use_image_embeddings {
+        let first_image_token_index = input_tokens
+            .iter()
+            .position(|&x| x == image_token_index as u32)
+            .unwrap_or(0);
+        let last_image_token_index = input_tokens
+            .iter()
+            .rposition(|&x| x == image_token_index as u32)
+            .unwrap_or(0);
+        (
+            &input_tokens[..first_image_token_index],
+            &input_tokens[last_image_token_index + 1..],
+        )
+    } else {
+        (&[][..], input_tokens)
+    };
+
+    let text_before = interpreter::tensor(
+        backend,
+        Shape(vec![1, text_before_tokens.len()]),
+        text_before_tokens.to_vec(),
+    )
+    .map_err(|err| anyhow::anyhow!("text_before tensor error: {:?}", err))?;
+    let text_after = interpreter::tensor(
+        backend,
+        Shape(vec![1, text_after_tokens.len()]),
+        text_after_tokens.to_vec(),
+    )
+    .map_err(|err| anyhow::anyhow!("text_after tensor error: {:?}", err))?;
+    let image_embeddings = if use_image_embeddings {
+        visual_embeddings.clone()
+    } else {
+        empty_image_embeddings
+    };
+
+    Ok(vec![text_before, image_embeddings, text_after])
 }

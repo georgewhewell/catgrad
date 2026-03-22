@@ -51,6 +51,10 @@ impl<B: interpreter::Backend> Session<B> {
         Snapshot::new(self.runtime_id, self.program_id.clone(), self.state.clone())
     }
 
+    pub fn into_snapshot(self) -> Snapshot<B> {
+        Snapshot::new(self.runtime_id, self.program_id, self.state)
+    }
+
     pub fn run_raw(
         &mut self,
         mut inputs: Vec<interpreter::Value<B>>,
