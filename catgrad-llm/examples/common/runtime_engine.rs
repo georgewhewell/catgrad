@@ -1,7 +1,7 @@
 use catgrad::interpreter;
 use catgrad_llm::types;
 use catgrad_llm::utils::{get_model, get_model_chat_template, load_model};
-use catgrad_llm::{BoundProgram, Detokenizer, PreparedPrompt, Program, Runtime};
+use catgrad_llm::{BoundProgram, Detokenizer, PreparedPrompt, Program, ProgramSpec, Runtime};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use tokenizers::Tokenizer;
@@ -57,9 +57,14 @@ impl<B: interpreter::Backend> TextInferenceEngine<B> {
     ) -> catgrad_llm::Result<Self> {
         let (parameter_values, parameter_types, config_json, tokenizer, _) =
             load_model(model_name, revision, &backend)?;
-        let seed_program = Program::text_from_config(&config_json, 1)?;
-        let runtime = Runtime::new(backend, &seed_program, parameter_values, parameter_types)?;
-        let seed_bound = runtime.bind(seed_program)?;
+        let seed_spec = ProgramSpec::text_from_config(&config_json, 1)?;
+        let runtime = Runtime::new(
+            backend,
+            seed_spec.weight_post_process,
+            parameter_values,
+            parameter_types,
+        )?;
+        let seed_bound = runtime.bind(Program::from_spec(seed_spec)?)?;
         let chat_template = get_model_chat_template(model_name, revision)?
             .replace("{% generation %}", "")
             .replace("{% endgeneration %}", "");
@@ -157,7 +162,10 @@ impl<B: interpreter::Backend> TextInferenceEngine<B> {
             return Ok(bound_program.clone());
         }
 
-        let program = Program::text_from_config(&self.config_json, max_sequence_length)?;
+        let program = Program::from_spec(ProgramSpec::text_from_config(
+            &self.config_json,
+            max_sequence_length,
+        )?)?;
         let bound_program = self.runtime.bind(program)?;
         self.bound_programs
             .borrow_mut()

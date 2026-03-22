@@ -10,6 +10,6 @@ pub mod types;
 pub mod utils;
 
 pub use error::LLMError;
-pub use runtime::{BoundProgram, Program, Runtime, Session, Snapshot};
+pub use runtime::{BoundProgram, Program, ProgramSpec, Runtime, Session, Snapshot};
 pub use utils::{Detokenizer, PreparedPrompt, detokenize_tokens};
 pub type Result<T, E = error::LLMError> = std::result::Result<T, E>;

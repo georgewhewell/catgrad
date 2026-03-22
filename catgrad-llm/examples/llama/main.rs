@@ -2,7 +2,7 @@ use anyhow::Result;
 use catgrad::interpreter::backend::candle::CandleBackend;
 use catgrad::interpreter::backend::ndarray::NdArrayBackend;
 use catgrad::prelude::*;
-use catgrad_llm::{Program, Runtime};
+use catgrad_llm::{Program, ProgramSpec, Runtime};
 use catgrad_llm::utils::{
     cache_path_for_embeddings, get_model, get_model_chat_template, load_and_preprocess_image,
     load_cached_embeddings, load_model, print_bench_table, render_chat_template,
@@ -235,7 +235,7 @@ fn run_with_backend<B: interpreter::Backend>(
 
     let program = if let Some(load_path) = &args.load {
         let file = std::fs::File::open(load_path)?;
-        serde_json::from_reader(file)?
+        Program::from_spec(serde_json::from_reader::<_, ProgramSpec>(file)?)?
     } else if use_image {
         let language_model = model.multimodal_language_module().ok_or_else(|| {
             anyhow::anyhow!(
@@ -243,20 +243,23 @@ fn run_with_backend<B: interpreter::Backend>(
                 model_name
             )
         })?;
-        Program::from_module(
+        Program::from_spec(ProgramSpec::from_module(
             language_model.as_ref(),
             catgrad::prelude::Path::empty(),
             model.empty_state_type(),
             max_sequence_length,
             model.weight_post_process(),
-        )?
+        )?)?
     } else {
-        Program::text_from_config(&config_json, max_sequence_length)?
+        Program::from_spec(ProgramSpec::text_from_config(
+            &config_json,
+            max_sequence_length,
+        )?)?
     };
 
     if let Some(dump_path) = &args.dump {
         let file = std::fs::File::create(dump_path)?;
-        serde_json::to_writer_pretty(file, &program)?;
+        serde_json::to_writer_pretty(file, program.spec())?;
         eprintln!(
             "Program for {} and max_seq_length of {max_sequence_length} dumped to {}",
             model.path(),
@@ -268,7 +271,12 @@ fn run_with_backend<B: interpreter::Backend>(
     let mut generated_tokens = 0;
     let mut start_gen = std::time::Instant::now();
     let mut elapsed_pp = std::time::Duration::ZERO;
-    let runtime = Runtime::new(backend, &program, parameter_values, parameter_types)?;
+    let runtime = Runtime::new(
+        backend,
+        program.weight_post_process,
+        parameter_values,
+        parameter_types,
+    )?;
     let bound_program = runtime.bind(program)?;
 
     let mut multimodal_ctx: Option<MultimodalRuntime<B>> = None;
@@ -276,13 +284,13 @@ fn run_with_backend<B: interpreter::Backend>(
         let vision_model = model.multimodal_vision_module().ok_or_else(|| {
             anyhow::anyhow!("Model {} does not provide vision module", model_name)
         })?;
-        let vision_program = Program::from_module(
+        let vision_program = Program::from_spec(ProgramSpec::from_module(
             vision_model.as_ref(),
             catgrad::prelude::Path::empty(),
             vec![],
             0,
             model.weight_post_process(),
-        )?;
+        )?)?;
         let bound_vision = runtime.bind(vision_program)?;
         let image_path = args
             .image

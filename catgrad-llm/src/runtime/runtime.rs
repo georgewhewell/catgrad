@@ -1,5 +1,4 @@
 use super::bound::BoundProgram;
-use super::Program;
 use crate::helpers::WeightPostProcess;
 use crate::utils::post_process_weights;
 use crate::{LLMError, Result};
@@ -23,12 +22,12 @@ pub struct Runtime<B: interpreter::Backend> {
 impl<B: interpreter::Backend> Runtime<B> {
     pub fn new(
         backend: B,
-        program: &Program,
+        weight_post_process: WeightPostProcess,
         mut parameter_values: interpreter::Parameters<B>,
         mut parameter_types: typecheck::Parameters,
     ) -> Result<Self> {
         post_process_weights(
-            program.weight_post_process,
+            weight_post_process,
             &backend,
             &mut parameter_values,
             &mut parameter_types,
@@ -39,11 +38,11 @@ impl<B: interpreter::Backend> Runtime<B> {
             backend,
             parameter_values,
             parameter_types,
-            weight_post_process: program.weight_post_process,
+            weight_post_process,
         })
     }
 
-    pub fn bind(&self, program: Program) -> Result<BoundProgram<B>> {
+    pub fn bind(&self, program: crate::runtime::Program) -> Result<BoundProgram<B>> {
         if program.weight_post_process != self.weight_post_process {
             return Err(LLMError::IncompatibleRuntime(format!(
                 "program expects weight post-process {:?}, runtime was initialized with {:?}",
@@ -61,9 +60,8 @@ impl<B: interpreter::Backend> Runtime<B> {
             |err| LLMError::InvalidProgram(format!("program failed typecheck: {err:?}")),
         )?;
 
-        let program_id = program.id()?;
+        let program_id = Arc::<str>::from(program.id());
         let typed_term = Arc::new(program.typed_term.clone());
-        let program = Arc::new(program);
         let interpreter = Arc::new(Interpreter::new(
             self.backend.clone(),
             env,
@@ -72,7 +70,7 @@ impl<B: interpreter::Backend> Runtime<B> {
 
         Ok(BoundProgram::new(
             self.id,
-            Arc::<str>::from(program_id),
+            program_id,
             program,
             typed_term,
             interpreter,

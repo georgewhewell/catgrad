@@ -6,7 +6,7 @@ use std::sync::Arc;
 pub struct BoundProgram<B: interpreter::Backend> {
     runtime_id: u64,
     program_id: Arc<str>,
-    program: Arc<Program>,
+    program: Program,
     typed_term: Arc<catgrad::category::lang::TypedTerm>,
     interpreter: Arc<Interpreter<B>>,
 }
@@ -15,7 +15,7 @@ impl<B: interpreter::Backend> BoundProgram<B> {
     pub(crate) fn new(
         runtime_id: u64,
         program_id: Arc<str>,
-        program: Arc<Program>,
+        program: Program,
         typed_term: Arc<catgrad::category::lang::TypedTerm>,
         interpreter: Arc<Interpreter<B>>,
     ) -> Self {
@@ -33,7 +33,7 @@ impl<B: interpreter::Backend> BoundProgram<B> {
     }
 
     pub fn program(&self) -> &Program {
-        self.program.as_ref()
+        &self.program
     }
 
     pub fn empty_snapshot(&self) -> Snapshot<B> {
