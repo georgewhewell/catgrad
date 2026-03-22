@@ -27,7 +27,6 @@ impl<B: interpreter::Backend> Runtime<B> {
         mut parameter_values: interpreter::Parameters<B>,
         mut parameter_types: typecheck::Parameters,
     ) -> Result<Self> {
-        program.validate()?;
         post_process_weights(
             program.weight_post_process,
             &backend,
@@ -45,7 +44,6 @@ impl<B: interpreter::Backend> Runtime<B> {
     }
 
     pub fn bind(&self, program: Program) -> Result<BoundProgram<B>> {
-        program.validate()?;
         if program.weight_post_process != self.weight_post_process {
             return Err(LLMError::IncompatibleRuntime(format!(
                 "program expects weight post-process {:?}, runtime was initialized with {:?}",
@@ -55,7 +53,7 @@ impl<B: interpreter::Backend> Runtime<B> {
 
         let mut env = stdlib();
         env.declarations.extend(to_load_ops(
-            program.load_prefix.clone(),
+            program.module_path.clone(),
             self.parameter_types.keys(),
         ));
 

@@ -55,7 +55,6 @@ impl<B: interpreter::Backend> BoundProgram<B> {
         Session::from_bound(
             self.runtime_id,
             self.program_id.clone(),
-            self.program.interface,
             self.typed_term.clone(),
             self.interpreter.clone(),
             self.program.empty_state_type.len(),

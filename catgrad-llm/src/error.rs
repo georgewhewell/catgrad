@@ -14,9 +14,6 @@ pub enum LLMError {
     #[error("Invalid program: {0}")]
     InvalidProgram(String),
 
-    #[error("Unsupported program version {found}; expected {expected}")]
-    UnsupportedProgramVersion { found: u32, expected: u32 },
-
     #[error("Runtime incompatible with program: {0}")]
     IncompatibleRuntime(String),
 

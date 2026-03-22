@@ -2,7 +2,7 @@ use anyhow::Result;
 use catgrad::interpreter::backend::candle::CandleBackend;
 use catgrad::interpreter::backend::ndarray::NdArrayBackend;
 use catgrad::prelude::*;
-use catgrad_llm::{Program, ProgramInterface, Runtime};
+use catgrad_llm::{Program, Runtime};
 use catgrad_llm::utils::{
     cache_path_for_embeddings, get_model, get_model_chat_template, load_and_preprocess_image,
     load_cached_embeddings, load_model, print_bench_table, render_chat_template,
@@ -245,7 +245,6 @@ fn run_with_backend<B: interpreter::Backend>(
         })?;
         Program::from_module(
             language_model.as_ref(),
-            ProgramInterface::Raw,
             catgrad::prelude::Path::empty(),
             model.empty_state_type(),
             max_sequence_length,
@@ -279,7 +278,6 @@ fn run_with_backend<B: interpreter::Backend>(
         })?;
         let vision_program = Program::from_module(
             vision_model.as_ref(),
-            ProgramInterface::Raw,
             catgrad::prelude::Path::empty(),
             vec![],
             0,

@@ -5,7 +5,7 @@ mod session;
 mod snapshot;
 
 pub use bound::BoundProgram;
-pub use program::{CURRENT_PROGRAM_VERSION, Program, ProgramInterface};
+pub use program::Program;
 pub use runtime::Runtime;
 pub use session::Session;
 pub use snapshot::Snapshot;

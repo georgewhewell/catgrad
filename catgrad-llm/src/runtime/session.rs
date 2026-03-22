@@ -1,4 +1,4 @@
-use super::{ProgramInterface, Snapshot};
+use super::Snapshot;
 use crate::{LLMError, Result};
 use catgrad::category::lang::TypedTerm;
 use catgrad::interpreter::{self, Interpreter};
@@ -9,7 +9,6 @@ use std::sync::Arc;
 pub struct Session<B: interpreter::Backend> {
     runtime_id: u64,
     program_id: Arc<str>,
-    interface: ProgramInterface,
     typed_term: Arc<TypedTerm>,
     interpreter: Arc<Interpreter<B>>,
     state_arity: usize,
@@ -20,7 +19,6 @@ impl<B: interpreter::Backend> Session<B> {
     pub(crate) fn from_bound(
         runtime_id: u64,
         program_id: Arc<str>,
-        interface: ProgramInterface,
         typed_term: Arc<TypedTerm>,
         interpreter: Arc<Interpreter<B>>,
         state_arity: usize,
@@ -39,7 +37,6 @@ impl<B: interpreter::Backend> Session<B> {
         Ok(Self {
             runtime_id,
             program_id,
-            interface,
             typed_term,
             interpreter,
             state_arity,
@@ -80,12 +77,6 @@ impl<B: interpreter::Backend> Session<B> {
     }
 
     pub fn step_text(&mut self, input_tokens: &[u32]) -> Result<u32> {
-        if self.interface != ProgramInterface::Text {
-            return Err(LLMError::InvalidProgram(
-                "step_text requires a text program".to_string(),
-            ));
-        }
-
         let input_tensor = interpreter::tensor(
             &self.interpreter.backend,
             Shape(vec![1, input_tokens.len()]),
