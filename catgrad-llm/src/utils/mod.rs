@@ -9,7 +9,6 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use tokenizers::tokenizer::Tokenizer;
 
-use crate::config::LLMConfig;
 use crate::helpers::{LLMModel, WeightPostProcess};
 use crate::models;
 use crate::{LLMError, Result};
@@ -339,7 +338,7 @@ use catgrad::typecheck;
 // Concatenates MoE expert weights from separate tensors into single tensors per layer
 // to avoid the need for dynamic parameter names
 pub(crate) fn concat_moe_experts<B: interpreter::Backend>(
-    config: &dyn LLMConfig,
+    num_hidden_layers: usize,
     num_local_experts: usize,
     backend: &B,
     parameter_values: &mut interpreter::Parameters<B>,
@@ -349,7 +348,7 @@ pub(crate) fn concat_moe_experts<B: interpreter::Backend>(
 
     let proj_names = ["down_proj", "gate_proj", "up_proj"];
 
-    for layer_idx in 0..config.num_hidden_layers() {
+    for layer_idx in 0..num_hidden_layers {
         for proj_name in &proj_names {
             // Collect all expert tensors for this layer and projection
             let mut expert_tensors = Vec::new();
@@ -434,15 +433,17 @@ pub(crate) fn concat_moe_experts<B: interpreter::Backend>(
 
 pub fn post_process_weights<B: interpreter::Backend>(
     post_process: WeightPostProcess,
-    config: &dyn LLMConfig,
     backend: &B,
     parameter_values: &mut interpreter::Parameters<B>,
     parameter_types: &mut typecheck::Parameters,
 ) -> Result<()> {
     match post_process {
         WeightPostProcess::None => Ok(()),
-        WeightPostProcess::ConcatMoeExperts { num_local_experts } => concat_moe_experts(
-            config,
+        WeightPostProcess::ConcatMoeExperts {
+            num_hidden_layers,
+            num_local_experts,
+        } => concat_moe_experts(
+            num_hidden_layers,
             num_local_experts,
             backend,
             parameter_values,
@@ -459,7 +460,6 @@ pub fn post_process_model_weights<B: interpreter::Backend>(
 ) -> Result<()> {
     post_process_weights(
         model.weight_post_process(),
-        model.config(),
         backend,
         parameter_values,
         parameter_types,

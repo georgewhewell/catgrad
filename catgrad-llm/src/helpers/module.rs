@@ -73,10 +73,13 @@ pub fn llm_type(config: &dyn LLMConfig) -> (Vec<Type>, Vec<Type>) {
     (vec![t_x, t_k, t_v], vec![t_y, t_k_out, t_v_out])
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum WeightPostProcess {
     None,
-    ConcatMoeExperts { num_local_experts: usize },
+    ConcatMoeExperts {
+        num_hidden_layers: usize,
+        num_local_experts: usize,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

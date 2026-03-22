@@ -11,6 +11,24 @@ pub enum LLMError {
     #[error("Unsupported model architecture: {0}")]
     UnsupportedModel(String),
 
+    #[error("Invalid program: {0}")]
+    InvalidProgram(String),
+
+    #[error("Unsupported program version {found}; expected {expected}")]
+    UnsupportedProgramVersion { found: u32, expected: u32 },
+
+    #[error("Runtime incompatible with program: {0}")]
+    IncompatibleRuntime(String),
+
+    #[error("Snapshot incompatible with bound program")]
+    IncompatibleSnapshot,
+
+    #[error("Program execution failed: {0}")]
+    ExecutionError(String),
+
+    #[error("Unexpected program output: {0}")]
+    UnexpectedProgramOutput(String),
+
     #[error("Invalid model config: {0}")]
     InvalidModelConfig(String),
 

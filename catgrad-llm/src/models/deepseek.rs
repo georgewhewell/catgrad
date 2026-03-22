@@ -109,6 +109,7 @@ impl LLMModel for DeepSeekModel {
 
     fn weight_post_process(&self) -> WeightPostProcess {
         WeightPostProcess::ConcatMoeExperts {
+            num_hidden_layers: self.config.num_hidden_layers,
             num_local_experts: self.config.num_local_experts,
         }
     }
