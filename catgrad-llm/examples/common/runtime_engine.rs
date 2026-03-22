@@ -49,7 +49,12 @@ impl From<GenerationTermination> for types::anthropic::StopReason {
 }
 
 impl<B: interpreter::Backend> TextInferenceEngine<B> {
-    pub fn new(model_name: &str, revision: &str, backend: B, use_kv_cache: bool) -> catgrad_llm::Result<Self> {
+    pub fn new(
+        model_name: &str,
+        revision: &str,
+        backend: B,
+        use_kv_cache: bool,
+    ) -> catgrad_llm::Result<Self> {
         let (parameter_values, parameter_types, config_json, tokenizer, _) =
             load_model(model_name, revision, &backend)?;
         let seed_program = Program::text_from_config(&config_json, 1)?;
@@ -74,7 +79,10 @@ impl<B: interpreter::Backend> TextInferenceEngine<B> {
         })
     }
 
-    pub fn prepare_messages(&self, messages: &[types::Message]) -> catgrad_llm::Result<PreparedPrompt> {
+    pub fn prepare_messages(
+        &self,
+        messages: &[types::Message],
+    ) -> catgrad_llm::Result<PreparedPrompt> {
         PreparedPrompt::from_messages(
             &self.tokenizer,
             &self.chat_template,
@@ -102,8 +110,7 @@ impl<B: interpreter::Backend> TextInferenceEngine<B> {
         let empty_snapshot = bound_program.empty_snapshot();
         let mut snapshot = empty_snapshot.clone();
         let mut token_ids = encode_tokens(&prepared.input_ids)?;
-        let mut decoder =
-            Detokenizer::from_tokenizer(&self.tokenizer, &prepared.stop_token_ids);
+        let mut decoder = Detokenizer::from_tokenizer(&self.tokenizer, &prepared.stop_token_ids);
 
         let mut completion_tokens = 0u32;
         let mut termination = GenerationTermination::MaxTokens;

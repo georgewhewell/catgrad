@@ -1,3 +1,4 @@
+#[path = "common/runtime_engine.rs"]
 mod runtime_engine;
 
 use catgrad::interpreter::backend::candle::CandleBackend;
