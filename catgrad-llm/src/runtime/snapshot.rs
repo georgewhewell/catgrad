@@ -1,3 +1,4 @@
+use catgrad::category::core::Dtype;
 use catgrad::interpreter;
 use std::sync::Arc;
 
@@ -35,5 +36,42 @@ impl<B: interpreter::Backend> Snapshot<B> {
 
     pub(crate) fn state(&self) -> &[interpreter::Value<B>] {
         &self.state
+    }
+
+    pub fn logical_bytes(&self) -> usize {
+        self.state
+            .iter()
+            .map(|value| match value {
+                interpreter::Value::Tensor(tensor) => {
+                    tensor.shape().size().saturating_mul(dtype_size(tensor.dtype()))
+                }
+                _ => 0,
+            })
+            .sum()
+    }
+}
+
+const fn dtype_size(dtype: Dtype) -> usize {
+    match dtype {
+        Dtype::F32 | Dtype::U32 => 4,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Snapshot;
+    use catgrad::interpreter::backend::shape_only::ShapeOnlyBackend;
+    use catgrad::interpreter::{self, Backend};
+    use std::sync::Arc;
+
+    #[test]
+    fn logical_bytes_uses_runtime_tensor_shapes() {
+        let backend = ShapeOnlyBackend;
+        let state = vec![
+            interpreter::Value::Tensor(backend.zeros(catgrad::prelude::Shape(vec![2, 3]), catgrad::prelude::Dtype::F32)),
+            interpreter::Value::Tensor(backend.zeros(catgrad::prelude::Shape(vec![5]), catgrad::prelude::Dtype::U32)),
+        ];
+        let snapshot = Snapshot::new(1, Arc::<str>::from("program"), state);
+        assert_eq!(snapshot.logical_bytes(), (2 * 3 + 5) * 4);
     }
 }
