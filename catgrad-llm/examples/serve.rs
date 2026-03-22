@@ -1,4 +1,8 @@
+mod runtime_engine;
+
+use catgrad::interpreter::backend::candle::CandleBackend;
 use clap::Parser;
+use runtime_engine::TextInferenceEngine;
 use serde::Serialize;
 use serde_json::json;
 use std::io::{Cursor, Read};
@@ -9,7 +13,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 use catgrad_llm::LLMError;
-use catgrad_llm::run::ModelEngine;
 use catgrad_llm::types::{self, anthropic, openai, plain};
 use catgrad_llm::utils::from_json_slice;
 
@@ -43,7 +46,7 @@ struct Args {
 }
 
 struct InferenceEngine {
-    engine: ModelEngine,
+    engine: TextInferenceEngine<CandleBackend>,
     model_name: String,
     default_max_tokens: u32,
 }
@@ -51,7 +54,7 @@ struct InferenceEngine {
 impl InferenceEngine {
     fn new(model: &str, use_kv_cache: bool, default_max_tokens: u32) -> anyhow::Result<Self> {
         Ok(Self {
-            engine: ModelEngine::new(model, use_kv_cache)?,
+            engine: TextInferenceEngine::new(model, "main", CandleBackend::new(), use_kv_cache)?,
             model_name: model.to_string(),
             default_max_tokens,
         })

@@ -1,10 +1,13 @@
-use catgrad_llm::run::ModelEngine;
+mod runtime_engine;
+
+use catgrad::interpreter::backend::candle::CandleBackend;
 use catgrad_llm::types::Message;
 use catgrad_llm::types::openai::ChatMessage;
+use runtime_engine::TextInferenceEngine;
 use std::io::Write;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let engine = ModelEngine::new("Qwen/Qwen3-0.6B", true)?;
+    let engine = TextInferenceEngine::new("Qwen/Qwen3-0.6B", "main", CandleBackend::new(), true)?;
 
     // Make some message context
     let system_message = Message::openai(ChatMessage::system("You are a helpful chat assistant"));
