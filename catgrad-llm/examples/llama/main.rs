@@ -234,8 +234,8 @@ fn run_with_backend<B: interpreter::Backend>(
     };
 
     let program = if let Some(load_path) = &args.load {
-        let file = std::fs::File::open(load_path)?;
-        Program::from_spec(serde_json::from_reader::<_, ProgramSpec>(file)?)?
+        let bytes = std::fs::read(load_path)?;
+        bytes.as_slice().try_into()?
     } else if use_image {
         let language_model = model.multimodal_language_module().ok_or_else(|| {
             anyhow::anyhow!(
@@ -258,10 +258,9 @@ fn run_with_backend<B: interpreter::Backend>(
     };
 
     if let Some(dump_path) = &args.dump {
-        let file = std::fs::File::create(dump_path)?;
-        serde_json::to_writer_pretty(file, program.spec())?;
+        std::fs::write(dump_path, program.canonical_bytes())?;
         eprintln!(
-            "Program for {} and max_seq_length of {max_sequence_length} dumped to {}",
+            "Program bytes for {} and max_seq_length of {max_sequence_length} dumped to {}",
             model.path(),
             dump_path.display()
         );

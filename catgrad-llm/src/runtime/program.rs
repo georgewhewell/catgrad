@@ -1,6 +1,7 @@
 use crate::helpers::WeightPostProcess;
 use crate::utils::get_model;
 use crate::{LLMError, Result};
+use bincode::config;
 use catgrad::category::core::{Dtype, Shape};
 use catgrad::category::lang::TypedTerm;
 use catgrad::prelude::{DynModule, Path};
@@ -69,12 +70,13 @@ impl ProgramSpec {
         )
     }
 
-    pub fn normalized_json(&self) -> Result<Vec<u8>> {
-        serde_json::to_vec(self).map_err(LLMError::from)
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>> {
+        bincode::serde::encode_to_vec(self, config::standard())
+            .map_err(|err| LLMError::InvalidProgram(format!("failed to encode program: {err}")))
     }
 
     pub fn id(&self) -> Result<String> {
-        let bytes = self.normalized_json()?;
+        let bytes = self.canonical_bytes()?;
         Ok(blake3::hash(&bytes).to_hex().to_string())
     }
 }
@@ -86,23 +88,18 @@ pub struct Program(Arc<ProgramInner>);
 struct ProgramInner {
     spec: ProgramSpec,
     id: Arc<str>,
-    normalized_json: Arc<[u8]>,
+    canonical_bytes: Arc<[u8]>,
 }
 
 impl Program {
     pub fn from_spec(spec: ProgramSpec) -> Result<Self> {
-        let normalized_json: Arc<[u8]> = spec.normalized_json()?.into();
-        let id = Arc::<str>::from(blake3::hash(&normalized_json).to_hex().to_string());
+        let canonical_bytes: Arc<[u8]> = spec.canonical_bytes()?.into();
+        let id = Arc::<str>::from(blake3::hash(&canonical_bytes).to_hex().to_string());
         Ok(Self(Arc::new(ProgramInner {
             spec,
             id,
-            normalized_json,
+            canonical_bytes,
         })))
-    }
-
-    pub fn parse_json(bytes: &[u8]) -> Result<Self> {
-        let spec = serde_json::from_slice(bytes)?;
-        Self::from_spec(spec)
     }
 
     pub fn spec(&self) -> &ProgramSpec {
@@ -113,8 +110,26 @@ impl Program {
         &self.0.id
     }
 
-    pub fn normalized_json(&self) -> &[u8] {
-        &self.0.normalized_json
+    pub fn canonical_bytes(&self) -> &[u8] {
+        &self.0.canonical_bytes
+    }
+}
+
+impl TryFrom<&[u8]> for Program {
+    type Error = LLMError;
+
+    fn try_from(bytes: &[u8]) -> std::result::Result<Self, Self::Error> {
+        let (spec, consumed) =
+            bincode::serde::decode_from_slice(bytes, config::standard()).map_err(|err| {
+                LLMError::InvalidProgram(format!("failed to decode program: {err}"))
+            })?;
+        if consumed != bytes.len() {
+            return Err(LLMError::InvalidProgram(format!(
+                "program payload had {} trailing bytes",
+                bytes.len().saturating_sub(consumed)
+            )));
+        }
+        Self::from_spec(spec)
     }
 }
 
@@ -135,7 +150,7 @@ mod tests {
     use catgrad::path::Path;
 
     #[test]
-    fn canonical_program_normalizes_and_hashes_spec() {
+    fn canonical_program_encodes_and_hashes_spec() {
         let spec = ProgramSpec::from_typed_term(
             TypedTerm {
                 term: catgrad::category::lang::Term::empty(),
@@ -148,10 +163,31 @@ mod tests {
             WeightPostProcess::None,
         );
         let expected_id = spec.id().unwrap();
-        let expected_json = spec.normalized_json().unwrap();
+        let expected_bytes = spec.canonical_bytes().unwrap();
 
         let program = Program::from_spec(spec).unwrap();
         assert_eq!(program.id(), expected_id);
-        assert_eq!(program.normalized_json(), expected_json.as_slice());
+        assert_eq!(program.canonical_bytes(), expected_bytes.as_slice());
+    }
+
+    #[test]
+    fn canonical_program_round_trips_binary_encoding() {
+        let spec = ProgramSpec::from_typed_term(
+            TypedTerm {
+                term: catgrad::category::lang::Term::empty(),
+                source_type: vec![],
+                target_type: vec![],
+            },
+            Path::empty(),
+            vec![(Dtype::F32, Shape(vec![4, 5]))],
+            7,
+            WeightPostProcess::None,
+        );
+
+        let program = Program::from_spec(spec).unwrap();
+        let reparsed = Program::try_from(program.canonical_bytes()).unwrap();
+
+        assert_eq!(reparsed.id(), program.id());
+        assert_eq!(reparsed.canonical_bytes(), program.canonical_bytes());
     }
 }
