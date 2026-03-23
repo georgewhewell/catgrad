@@ -14,8 +14,8 @@ use tokenizers::tokenizer::{Result, Tokenizer};
 
 use catgrad_llm::utils::{
     get_model_chat_template, get_model_files, print_bench_table, read_safetensors_multiple,
-    render_chat_template,
 };
+use catgrad_llm::PromptRequest;
 
 use catgrad_llm::legacy::models::utils::{Cache, Config, ModelBuilder, get_model};
 use catgrad_llm::legacy::nn::layers::{argmax, cast, reshape};
@@ -341,7 +341,9 @@ pub fn main() -> Result<()> {
     } else if chat_template.is_empty() || args.raw {
         args.prompt.clone()
     } else {
-        render_chat_template(&chat_template, &args.prompt, false, args.thinking).unwrap()
+        PromptRequest::single_user(&args.prompt, false, args.thinking)
+            .render(Some(&chat_template))
+            .unwrap()
     };
 
     let encoding = tokenizer.encode(prompt.clone(), true)?;

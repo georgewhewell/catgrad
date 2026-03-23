@@ -2,11 +2,10 @@ use anyhow::Result;
 use catgrad::interpreter::backend::candle::CandleBackend;
 use catgrad::interpreter::backend::ndarray::NdArrayBackend;
 use catgrad::prelude::*;
-use catgrad_llm::{Program, ProgramSpec, Runtime};
+use catgrad_llm::{Program, ProgramSpec, PromptRequest, Runtime};
 use catgrad_llm::utils::{
     cache_path_for_embeddings, get_model, get_model_chat_template, load_and_preprocess_image,
-    load_cached_embeddings, load_model, print_bench_table, render_chat_template,
-    save_cached_embeddings,
+    load_cached_embeddings, load_model, print_bench_table, save_cached_embeddings,
 };
 use clap::{Parser, ValueEnum};
 use serde::Deserialize;
@@ -189,7 +188,7 @@ fn run_with_backend<B: interpreter::Backend>(
     } else if chat_template.is_empty() || args.raw {
         args.prompt.clone()
     } else {
-        render_chat_template(&chat_template, &args.prompt, use_image, false)?
+        PromptRequest::single_user(&args.prompt, use_image, false).render(Some(&chat_template))?
     };
 
     if !benchmarking {

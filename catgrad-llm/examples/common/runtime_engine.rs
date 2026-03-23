@@ -1,7 +1,9 @@
 use catgrad::interpreter;
 use catgrad_llm::types;
 use catgrad_llm::utils::{get_model, get_model_chat_template, load_model};
-use catgrad_llm::{BoundProgram, Detokenizer, PreparedPrompt, Program, ProgramSpec, Runtime};
+use catgrad_llm::{
+    BoundProgram, Detokenizer, PreparedPrompt, Program, ProgramSpec, PromptRequest, Runtime,
+};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use tokenizers::Tokenizer;
@@ -88,17 +90,24 @@ impl<B: interpreter::Backend> TextInferenceEngine<B> {
         &self,
         messages: &[types::Message],
     ) -> catgrad_llm::Result<PreparedPrompt> {
-        PreparedPrompt::from_messages(
+        let request = PromptRequest::from_messages(messages, false)?;
+        PreparedPrompt::from_request(
             &self.tokenizer,
-            &self.chat_template,
-            messages,
+            Some(&self.chat_template),
+            &request,
             &self.eos_token_ids,
         )
     }
 
     #[allow(dead_code)]
     pub fn prepare_prompt(&self, prompt: &str) -> catgrad_llm::Result<PreparedPrompt> {
-        PreparedPrompt::from_prompt(&self.tokenizer, prompt, &self.eos_token_ids)
+        let request = PromptRequest::plain(prompt);
+        PreparedPrompt::from_request(
+            &self.tokenizer,
+            Some(&self.chat_template),
+            &request,
+            &self.eos_token_ids,
+        )
     }
 
     pub fn generate_from_prepared<F>(

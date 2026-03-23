@@ -1,8 +1,21 @@
-use crate::{Result, types};
+use crate::{LLMError, Result, types};
+use chrono::Local;
 use minijinja::{Environment, Value, context};
 use minijinja_contrib::pycompat::unknown_method_callback;
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use tokenizers::tokenizer::Tokenizer;
+
+#[derive(Debug, Clone)]
+enum PromptRequestInner {
+    Plain(String),
+    Chat {
+        message_context: Vec<Value>,
+        enable_thinking: bool,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct PromptRequest(PromptRequestInner);
 
 /// Tokenized model input and its stop tokens.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,15 +44,110 @@ impl PreparedPrompt {
         Ok(Self::new(input_ids, stop_token_ids.to_vec()))
     }
 
-    /// Renders chat messages through the template and tokenizes the result.
-    pub fn from_messages(
+    /// Renders a normalized prompt request and tokenizes the result.
+    pub fn from_request(
         tokenizer: &Tokenizer,
-        chat_template: &str,
-        messages: &[types::Message],
+        chat_template: Option<&str>,
+        request: &PromptRequest,
         stop_token_ids: &[i32],
     ) -> Result<Self> {
-        let prompt = render_chat_prompt(chat_template, messages)?;
+        let prompt = request.render(chat_template)?;
         Self::from_prompt(tokenizer, &prompt, stop_token_ids)
+    }
+}
+
+impl PromptRequest {
+    pub fn plain(prompt: impl Into<String>) -> Self {
+        Self(PromptRequestInner::Plain(prompt.into()))
+    }
+
+    pub fn single_user(
+        prompt: impl Into<String>,
+        has_image: bool,
+        enable_thinking: bool,
+    ) -> Self {
+        let prompt = prompt.into();
+        let message_context = if has_image {
+            let content = vec![
+                context!(type => "text", text => prompt),
+                context!(type => "image"),
+            ];
+            vec![Value::from_serialize(
+                serde_json::json!({
+                    "role": "user",
+                    "content": content,
+                }),
+            )]
+        } else {
+            vec![Value::from_serialize(
+                serde_json::json!({
+                    "role": "user",
+                    "content": prompt,
+                }),
+            )]
+        };
+
+        Self(PromptRequestInner::Chat {
+            message_context,
+            enable_thinking,
+        })
+    }
+
+    pub fn from_messages(messages: &[types::Message], enable_thinking: bool) -> Result<Self> {
+        let message_context = messages
+            .iter()
+            .map(message_to_template_context)
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Self(PromptRequestInner::Chat {
+            message_context,
+            enable_thinking,
+        }))
+    }
+
+    pub fn render(&self, chat_template: Option<&str>) -> Result<String> {
+        match &self.0 {
+            PromptRequestInner::Plain(prompt) => Ok(prompt.clone()),
+            PromptRequestInner::Chat {
+                message_context,
+                enable_thinking,
+            } => {
+                let chat_template = chat_template.ok_or_else(|| {
+                    LLMError::InvalidModelConfig("Missing chat template".to_string())
+                })?;
+                render_template_messages(chat_template, message_context, *enable_thinking)
+            }
+        }
+    }
+}
+
+impl TryFrom<&types::openai::ChatCompletionRequest> for PromptRequest {
+    type Error = LLMError;
+
+    fn try_from(value: &types::openai::ChatCompletionRequest) -> Result<Self> {
+        let messages = value
+            .messages
+            .iter()
+            .cloned()
+            .map(types::Message::from)
+            .collect::<Vec<_>>();
+        Self::from_messages(&messages, false)
+    }
+}
+
+impl TryFrom<&types::anthropic::MessageRequest> for PromptRequest {
+    type Error = LLMError;
+
+    fn try_from(value: &types::anthropic::MessageRequest) -> Result<Self> {
+        let messages = Vec::<types::Message>::from(value);
+        Self::from_messages(&messages, false)
+    }
+}
+
+impl TryFrom<&types::plain::CompletionRequest> for PromptRequest {
+    type Error = LLMError;
+
+    fn try_from(value: &types::plain::CompletionRequest) -> Result<Self> {
+        Ok(Self::plain(value.prompt.clone()))
     }
 }
 
@@ -74,22 +182,27 @@ pub(crate) fn message_to_template_context(message: &types::Message) -> Result<Va
     Ok(Value::from_serialize(map))
 }
 
-fn render_chat_prompt(chat_template: &str, messages: &[types::Message]) -> Result<String> {
+fn render_template_messages(
+    chat_template: &str,
+    messages: &[Value],
+    enable_thinking: bool,
+) -> Result<String> {
     let mut env = Environment::new();
     env.set_unknown_method_callback(unknown_method_callback);
+    env.add_function("strftime_now", strftime_now);
     env.add_template("chat", chat_template)?;
     let tmpl = env.get_template("chat")?;
-    let message_context: Vec<_> = messages
-        .iter()
-        .map(message_to_template_context)
-        .collect::<Result<_>>()?;
     let prompt = tmpl.render(context!(
-        messages => message_context,
+        messages => messages,
         add_generation_prompt => true,
-        enable_thinking => false
+        enable_thinking => enable_thinking
     ))?;
 
     Ok(prompt)
+}
+
+fn strftime_now(format_str: String) -> String {
+    Local::now().format(&format_str).to_string()
 }
 
 // HF chat templates generally expect message.content to be a plain string.
