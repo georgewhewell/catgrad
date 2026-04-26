@@ -1,6 +1,7 @@
 //! Anthropic Messages API wire format.
 use catgrad_llm::LLMError;
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 use serde_with::skip_serializing_none;
 use typed_builder::TypedBuilder;
 
@@ -79,6 +80,7 @@ pub struct MessageRequest {
     pub system: Option<SystemPrompt>,
     pub stream: Option<bool>,
     pub thinking: Option<ThinkingConfig>,
+    pub tools: Option<Vec<JsonValue>>,
 }
 
 /// Typed message content blocks.
@@ -86,7 +88,20 @@ pub struct MessageRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
-    Text { text: String },
+    Text {
+        text: String,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        input: JsonValue,
+    },
+    ToolResult {
+        tool_use_id: String,
+        content: JsonValue,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        is_error: Option<bool>,
+    },
 }
 
 /// Why generation stopped.
@@ -95,6 +110,7 @@ pub enum ContentBlock {
 pub enum StopReason {
     EndTurn,
     MaxTokens,
+    ToolUse,
 }
 
 /// Usage details for Messages API.
@@ -173,6 +189,7 @@ pub struct StreamMessageDelta {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlockDelta {
     TextDelta { text: String },
+    InputJsonDelta { partial_json: String },
 }
 
 /// Error event payload.
@@ -326,6 +343,14 @@ mod tests {
                 .thinking(Some(ThinkingConfig::Enabled {
                     budget_tokens: 1024,
                 }))
+                .tools(Some(vec![json!({
+                    "name": "lookup_weather",
+                    "description": "Get weather",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                    },
+                })]))
                 .build()
         );
     }

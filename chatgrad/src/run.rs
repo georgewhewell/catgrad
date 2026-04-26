@@ -208,21 +208,12 @@ impl ModelEngine {
             .cloned()
             .map(types::Message::from)
             .collect();
-        let tools = request
-            .tools
-            .as_deref()
-            .filter(|tools| !tools.is_empty())
-            .map(|tools| {
-                tools
-                    .iter()
-                    .map(minijinja::Value::from_serialize)
-                    .collect::<Vec<_>>()
-            });
+        let tools = request.tools.as_deref().filter(|tools| !tools.is_empty());
         self.prepare_chat_messages(
             &messages,
             RenderChatTemplateOptions {
                 thinking: request.reasoning_effort.into(),
-                tools: tools.as_deref(),
+                tools,
             },
         )
     }
@@ -233,11 +224,12 @@ impl ModelEngine {
         request: &types::anthropic::MessageRequest,
     ) -> Result<PreparedPrompt> {
         let messages: Vec<types::Message> = request.into();
+        let tools = request.tools.as_deref().filter(|tools| !tools.is_empty());
         self.prepare_chat_messages(
             &messages,
             RenderChatTemplateOptions {
                 thinking: request.thinking.into(),
-                tools: None,
+                tools,
             },
         )
     }
@@ -248,21 +240,12 @@ impl ModelEngine {
         request: &types::openai::responses::ResponseRequest,
     ) -> Result<PreparedPrompt> {
         let messages = request.to_messages()?;
-        let tools = request
-            .tools
-            .as_deref()
-            .filter(|tools| !tools.is_empty())
-            .map(|tools| {
-                tools
-                    .iter()
-                    .map(minijinja::Value::from_serialize)
-                    .collect::<Vec<_>>()
-            });
+        let tools = request.tools.as_deref().filter(|tools| !tools.is_empty());
         self.prepare_chat_messages(
             &messages,
             RenderChatTemplateOptions {
                 thinking: types::ThinkingPolicy::Disabled,
-                tools: tools.as_deref(),
+                tools,
             },
         )
     }

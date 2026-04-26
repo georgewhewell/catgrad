@@ -302,7 +302,7 @@ fn render_tool_prompt(
     chat_template: &str,
     tokenizer_config: &serde_json::Value,
     prompt: &str,
-    tools: &[Value],
+    tools: &[serde_json::Value],
     enable_thinking: bool,
 ) -> Result<String> {
     Ok(render_chat_template_values(
@@ -320,7 +320,7 @@ fn render_tool_follow_up_prompt(
     chat_template: &str,
     tokenizer_config: &serde_json::Value,
     prompt: &str,
-    tools: &[Value],
+    tools: &[serde_json::Value],
     tool_use_step: &ToolUseStep,
     tool_responses: &[String],
     enable_thinking: bool,
@@ -457,9 +457,6 @@ fn run_loaded_model<B: interpreter::Backend>(
 
     let tool_schemas = if args.tool_use {
         tools::tool_schemas()
-            .into_iter()
-            .map(Value::from_serialize)
-            .collect()
     } else {
         Vec::new()
     };
