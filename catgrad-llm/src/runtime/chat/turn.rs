@@ -177,7 +177,7 @@ impl ChatTurn {
     /// `ChatTurn` it came from without a self-referential borrow.
     pub fn make_parser(&self) -> Box<dyn IncrementalToolCallParser> {
         match (&self.tools, self.protocol) {
-            (Some(tools), Some(protocol)) => (protocol.make_parser)(Arc::clone(tools)),
+            (Some(tools), Some(protocol)) => protocol.make_parser(Arc::clone(tools)),
             _ => Box::new(PassthroughParser),
         }
     }

@@ -41,32 +41,33 @@ use std::sync::Arc;
 
 use serde_json::Value as JsonValue;
 
+use crate::runtime::chat::codecs::JsonObjectOrArrayCodec;
+use crate::runtime::chat::sentinel_engine::SentinelEngine;
 use crate::runtime::chat::{IncrementalToolCallParser, ToolDirectory, ToolSpec};
 use crate::types;
 
-use super::json_sentinel;
 
 const TOOL_CALL_OPEN: &str = "<tool_call>";
 const TOOL_CALL_CLOSE: &str = "</tool_call>";
 
 /// Construct a SmolLM2 parser bound to the given tool directory.
 ///
-/// The wire format is the same as Qwen3 / Hermes (`<tool_call>{...}</tool_call>`),
-/// so this delegates to the shared [`super::json_sentinel`] state machine.
+/// The wire format is the Hermes-style `<tool_call>{...}</tool_call>`
+/// (or `<tool_call>[{...}, ...]</tool_call>` for SmolLM2's array form).
+/// Built on the generic [`SentinelEngine`] with the Hermes-permissive
+/// JSON codec, which (a) treats `<tool_call>[]</tool_call>` as zero
+/// calls — SmolLM2's documented "no tool needed" reply — and (b) peels
+/// `{"type":"function","function":{...}}` spec-shape echoes back into
+/// the canonical call shape.
 pub fn make_parser(directory: Arc<ToolDirectory>) -> Box<dyn IncrementalToolCallParser> {
-    json_sentinel::make_parser(directory, TOOL_CALL_OPEN, TOOL_CALL_CLOSE)
+    Box::new(SentinelEngine::new_pair(
+        directory,
+        Box::new(JsonObjectOrArrayCodec::permissive()),
+        TOOL_CALL_OPEN,
+        TOOL_CALL_CLOSE,
+    ))
 }
 
-/// Render the bound tool list as the OpenAI-style envelope. SmolLM2's
-/// chat template ignores the `tools` jinja variable entirely — the
-/// useful injection happens via [`prepare_messages`] — but emit the
-/// envelope anyway so callers that introspect [`ToolCallProtocol`]
-/// see the same shape across protocols.
-///
-/// [`ToolCallProtocol`]: super::super::ToolCallProtocol
-pub fn render_tools(specs: &[ToolSpec]) -> JsonValue {
-    json_sentinel::render_openai_tool_envelope(specs)
-}
 
 /// Inject a system message describing the available tools and the
 /// expected `<tool_call>...</tool_call>` wire format, then return the
@@ -187,6 +188,26 @@ mod tests {
         DecodeEvent, IncrementalToolCallParser, StopReason, ToolDirectory, ToolSpec,
     };
     use serde_json::json;
+
+    /// Universal sentinel-engine scenarios via the shared harness.
+    /// SmolLM2's wire format is the same Hermes pair as Qwen3 (delegates
+    /// the same permissive JSON codec); the SmolLM2-specific tests
+    /// below cover prepare_messages and the empty-array zero-calls
+    /// signal.
+    #[test]
+    fn passes_universal_scenarios() {
+        use crate::runtime::chat::protocol_test_kit::{ProtocolTestFixture, directory_with_add};
+        ProtocolTestFixture {
+            make_parser: Box::new(make_parser),
+            directory: directory_with_add(),
+            valid_call_add_1_2: r##"<tool_call>[{"name":"add","arguments":{"a":1,"b":2}}]</tool_call>"##,
+            unknown_tool_call: r##"<tool_call>[{"name":"missing","arguments":{}}]</tool_call>"##,
+            invalid_args_call: r##"<tool_call>[{"name":"add","arguments":{"a":"x","b":2}}]</tool_call>"##,
+            malformed_payload: r##"<tool_call>not json</tool_call>"##,
+            open_sentinel_only: Some(r##"<tool_call>"##),
+        }
+        .run_universal_scenarios();
+    }
 
     fn add_tool() -> ToolSpec {
         ToolSpec::new(

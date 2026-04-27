@@ -45,521 +45,65 @@
 //! this; the parser asserts nothing about it because by the time text
 //! reaches `feed()` it is already a string.
 
+// All production wiring lives in `protocol.rs`'s `GEMMA4` registry
+// entry. Wire format: asymmetric sentinel pair (`<|tool_call>` /
+// `<tool_call|>`) wrapping `call:NAME{key:value, ...}` with
+// `<|"|>`-quoted strings. Parsed by `codecs::Gemma4Codec`.
+
+#[cfg(test)]
 use std::sync::Arc;
 
-use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
-
+#[cfg(test)]
+use crate::runtime::chat::sentinel_engine::MAX_TOOL_CALL_PAYLOAD_BYTES;
+#[cfg(test)]
 use crate::runtime::chat::{
-    DecodeEvent, IncrementalToolCallParser, ParserError, SentinelMatcher, StopReason,
-    ToolDirectory, ToolSpec,
+    DecodeEvent, IncrementalToolCallParser, ParserError, StopReason, ToolDirectory,
 };
-use crate::types;
+#[cfg(test)]
+use serde_json::Value as JsonValue;
 
-const TOOL_CALL_OPEN: &str = "<|tool_call>";
-const TOOL_CALL_CLOSE: &str = "<tool_call|>";
-const STRING_QUOTE: &str = "<|\"|>";
-const CALL_PREFIX: &str = "call:";
-
-/// Maximum bytes buffered between `<|tool_call>` and `<tool_call|>`
-/// before the parser fails the call as oversized. See Qwen3 protocol
-/// for rationale — same limit, same threat model.
-const MAX_TOOL_CALL_PAYLOAD_BYTES: usize = 64 * 1024;
-
-/// Construct a Gemma 4 parser bound to the given tool directory.
-pub fn make_parser(directory: Arc<ToolDirectory>) -> Box<dyn IncrementalToolCallParser> {
-    Box::new(Gemma4Parser::new(directory))
+#[cfg(test)]
+fn make_parser(directory: Arc<ToolDirectory>) -> Box<dyn IncrementalToolCallParser> {
+    use crate::runtime::chat::tool_protocol_for;
+    tool_protocol_for("Gemma4ForConditionalGeneration", &serde_json::Value::Null)
+        .expect("Gemma 4 arch is registered")
+        .make_parser(directory)
 }
 
-/// Render the bound tool list into the JSON shape Gemma 4's chat
-/// template expects. The template's `format_function_declaration`
-/// macro reads `tool['function']['name']`,
-/// `tool['function']['description']`, and `tool['function']['parameters']`
-/// — same OpenAI-style envelope Qwen3 uses, so the shape is shared.
-pub fn render_tools(specs: &[ToolSpec]) -> JsonValue {
-    JsonValue::Array(
-        specs
-            .iter()
-            .map(|spec| {
-                let mut function = JsonMap::new();
-                function.insert("name".to_string(), JsonValue::String(spec.name.clone()));
-                if let Some(description) = &spec.description {
-                    function.insert(
-                        "description".to_string(),
-                        JsonValue::String(description.clone()),
-                    );
-                }
-                function.insert("parameters".to_string(), spec.parameters.clone());
-                let mut wrapper = JsonMap::new();
-                wrapper.insert(
-                    "type".to_string(),
-                    JsonValue::String("function".to_string()),
-                );
-                wrapper.insert("function".to_string(), JsonValue::Object(function));
-                JsonValue::Object(wrapper)
-            })
-            .collect(),
-    )
-}
-
-struct Gemma4Parser {
-    directory: Arc<ToolDirectory>,
-    state: State,
-    next_index: usize,
-}
-
-enum State {
-    Outside { matcher: SentinelMatcher },
-    Inside { matcher: SentinelMatcher },
-    Terminated,
-}
-
-impl Gemma4Parser {
-    fn new(directory: Arc<ToolDirectory>) -> Self {
-        Self {
-            directory,
-            state: State::Outside {
-                matcher: SentinelMatcher::new(TOOL_CALL_OPEN),
-            },
-            next_index: 0,
-        }
-    }
-}
-
-impl IncrementalToolCallParser for Gemma4Parser {
-    fn feed(&mut self, text: &str) -> Vec<DecodeEvent> {
-        if matches!(self.state, State::Terminated) {
-            return Vec::new();
-        }
-        let mut events = Vec::new();
-        let mut remaining = text.to_string();
-        loop {
-            match &mut self.state {
-                State::Outside { matcher } => {
-                    matcher.push(&remaining);
-                    remaining.clear();
-                    if let Some((before, after)) = matcher.try_match() {
-                        if !before.is_empty() {
-                            events.push(DecodeEvent::TextDelta(before));
-                        }
-                        self.state = State::Inside {
-                            matcher: SentinelMatcher::new(TOOL_CALL_CLOSE),
-                        };
-                        remaining = after;
-                        if remaining.is_empty() {
-                            break;
-                        }
-                    } else {
-                        let safe = matcher.flush_safe_text();
-                        if !safe.is_empty() {
-                            events.push(DecodeEvent::TextDelta(safe));
-                        }
-                        break;
-                    }
-                }
-                State::Inside { matcher } => {
-                    matcher.push(&remaining);
-                    remaining.clear();
-                    if matcher.buffered_bytes() > MAX_TOOL_CALL_PAYLOAD_BYTES {
-                        return self.fatal(DecodeEvent::ParseError {
-                            sentinel: TOOL_CALL_OPEN,
-                            source: ParserError::PayloadTooLarge {
-                                limit_bytes: MAX_TOOL_CALL_PAYLOAD_BYTES,
-                            },
-                        });
-                    }
-                    if let Some((payload, after)) = matcher.try_match() {
-                        let index = self.next_index;
-                        match parse_payload(&payload, index, &self.directory) {
-                            PayloadOutcome::Call(call_events) => {
-                                self.next_index += 1;
-                                events.extend(call_events);
-                                self.state = State::Outside {
-                                    matcher: SentinelMatcher::new(TOOL_CALL_OPEN),
-                                };
-                                remaining = after;
-                                if remaining.is_empty() {
-                                    break;
-                                }
-                            }
-                            PayloadOutcome::Fatal(error_event) => {
-                                events.extend(self.fatal(error_event));
-                                return events;
-                            }
-                        }
-                    } else {
-                        break;
-                    }
-                }
-                State::Terminated => break,
-            }
-        }
-        events
-    }
-
-    fn finish(&mut self, reason: StopReason) -> Vec<DecodeEvent> {
-        if matches!(self.state, State::Terminated) {
-            return Vec::new();
-        }
-        let mut events = Vec::new();
-        match &mut self.state {
-            State::Outside { matcher } => {
-                let leftover = matcher.finish();
-                if !leftover.is_empty() {
-                    events.push(DecodeEvent::TextDelta(leftover));
-                }
-                events.push(DecodeEvent::Stop { reason });
-            }
-            State::Inside { .. } => {
-                events.extend(self.fatal(DecodeEvent::ParseError {
-                    sentinel: TOOL_CALL_OPEN,
-                    source: ParserError::Unterminated,
-                }));
-            }
-            State::Terminated => unreachable!("checked above"),
-        }
-        events
-    }
-}
-
-impl Gemma4Parser {
-    fn fatal(&mut self, error_event: DecodeEvent) -> Vec<DecodeEvent> {
-        self.state = State::Terminated;
-        vec![
-            error_event,
-            DecodeEvent::Stop {
-                reason: StopReason::ProtocolError,
-            },
-        ]
-    }
-}
-
-enum PayloadOutcome {
-    Call(Vec<DecodeEvent>),
-    Fatal(DecodeEvent),
-}
-
-fn parse_payload(payload: &str, index: usize, directory: &ToolDirectory) -> PayloadOutcome {
-    let trimmed = payload.trim();
-    if trimmed.is_empty() {
-        return malformed("empty tool-call payload");
-    }
-    // HF discussions #20 / #55 on google/gemma-4-*-it: an outdated
-    // chat-template revision emits `<|tool_call>{{...JSON...}}<tool_call|>`
-    // (a doubled-brace JSON literal) instead of the bare-key form. Detect
-    // it before the `call:` strip so the operator gets a useful hint
-    // pointing at the upstream issue.
-    if trimmed.starts_with("{{") {
-        return malformed(
-            "tool-call payload has double-braced JSON body — \
-             the chat template is an outdated revision (see \
-             huggingface.co/google/gemma-4-*-it discussions #20/#55)",
-        );
-    }
-    let Some(rest) = trimmed.strip_prefix(CALL_PREFIX) else {
-        return malformed("missing `call:` prefix in tool-call payload");
-    };
-    let Some(open_brace) = rest.find('{') else {
-        return malformed("tool-call payload missing `{` after function name");
-    };
-    let name = rest[..open_brace].trim();
-    if name.is_empty() {
-        return PayloadOutcome::Fatal(DecodeEvent::ParseError {
-            sentinel: TOOL_CALL_OPEN,
-            source: ParserError::MissingField("name"),
-        });
-    }
-    if !is_valid_function_name(name) {
-        return malformed(format!(
-            "invalid function name `{name}` — must match [A-Za-z_][A-Za-z0-9_\\-\\.]*"
-        ));
-    }
-    // Trim trailing whitespace on the body before the close-brace
-    // check — model output occasionally includes a trailing newline
-    // or spaces between `}` and `<tool_call|>` that we tolerate.
-    let body = rest[open_brace..].trim_end();
-    if !body.ends_with('}') {
-        return malformed("tool-call payload missing closing `}`");
-    }
-    let inner = &body[1..body.len() - 1];
-    let args = match parse_object_body(inner) {
-        Ok(value) => value,
-        Err(message) => return malformed(message),
-    };
-
-    // Defensive: the parser should have consumed every paired
-    // `<|"|>` quote sentinel. If one survives in the parsed args
-    // (anywhere in the JSON) something went wrong — most likely the
-    // upstream detokenization stripped one half of a pair, or the
-    // model emitted a malformed string. Surface as a hard error
-    // rather than ship a bogus tool call to the executor.
-    if args_contain_literal_quote_sentinel(&args) {
-        return malformed("parsed args still contain a literal `<|\"|>` sentinel");
-    }
-
-    if directory.lookup(name).is_none() {
-        return PayloadOutcome::Fatal(DecodeEvent::UnknownTool {
-            name: name.to_string(),
-            raw_args: args,
-        });
-    }
-    let errors = directory.validate_args(name, &args);
-    if !errors.is_empty() {
-        return PayloadOutcome::Fatal(DecodeEvent::InvalidArgs {
-            name: name.to_string(),
-            args,
-            errors,
-        });
-    }
-
-    let args_text = serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string());
-    PayloadOutcome::Call(vec![
-        DecodeEvent::ToolCallStart {
-            index,
-            name: name.to_string(),
-        },
-        DecodeEvent::ToolCallArgsDelta {
-            index,
-            delta: args_text,
-        },
-        DecodeEvent::ToolCallEnd { index, args },
-    ])
-}
-
-/// Function names match `[A-Za-z_][A-Za-z0-9_\-\.]*`. vLLM uses
-/// `[\w\-\.]+` and llama.cpp's PEG accepts the same superset; tools in
-/// the wild (e.g. `tools.shell-exec`, `web_search.fetch`) need `.` and
-/// `-`. Restricting the first character to `[A-Za-z_]` prevents
-/// ambiguity with leading digits and the empty-name case.
-fn is_valid_function_name(name: &str) -> bool {
-    let mut chars = name.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    if !(first.is_ascii_alphabetic() || first == '_') {
-        return false;
-    }
-    chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
-}
-
-/// Walk a parsed JSON value, returning true if any string anywhere in
-/// the structure literally contains `<|"|>` — which the parser should
-/// have already consumed as a quote sentinel. Survival means a sentinel
-/// was malformed upstream (truncated tokenizer output, half-pair
-/// stripped during decode, etc.).
+/// Local helper kept in the test module since two scenario tests
+/// assert on the parsed-args defensive check that the codec performs.
+#[cfg(test)]
 fn args_contain_literal_quote_sentinel(value: &JsonValue) -> bool {
     match value {
-        JsonValue::String(s) => s.contains(STRING_QUOTE),
+        JsonValue::String(s) => s.contains("<|\"|>"),
         JsonValue::Array(items) => items.iter().any(args_contain_literal_quote_sentinel),
         JsonValue::Object(map) => map.values().any(args_contain_literal_quote_sentinel),
         _ => false,
     }
 }
 
-fn malformed(message: impl Into<String>) -> PayloadOutcome {
-    PayloadOutcome::Fatal(DecodeEvent::ParseError {
-        sentinel: TOOL_CALL_OPEN,
-        source: ParserError::Malformed(message.into()),
-    })
-}
-
-/// Parse the contents between the outer `{...}` (i.e. without the
-/// braces themselves) into a JSON object. Empty input yields an empty
-/// object — the model may emit `{}` for parameter-less tools.
-fn parse_object_body(body: &str) -> Result<JsonValue, String> {
-    let body = body.trim();
-    let mut object = JsonMap::new();
-    if body.is_empty() {
-        return Ok(JsonValue::Object(object));
-    }
-    for entry in split_top_level(body, ',')? {
-        let (key, value) = split_key_value(entry)?;
-        object.insert(key, parse_value(value)?);
-    }
-    Ok(JsonValue::Object(object))
-}
-
-fn split_key_value(entry: &str) -> Result<(String, &str), String> {
-    let Some(colon) = find_top_level_colon(entry)? else {
-        return Err(format!("missing `:` in argument entry `{entry}`"));
-    };
-    let key = entry[..colon].trim().to_string();
-    if key.is_empty() {
-        return Err("empty argument key".to_string());
-    }
-    let value = entry[colon + 1..].trim();
-    Ok((key, value))
-}
-
-fn parse_value(text: &str) -> Result<JsonValue, String> {
-    let text = text.trim();
-    if text.is_empty() {
-        return Err("empty argument value".to_string());
-    }
-    if let Some(rest) = text.strip_prefix(STRING_QUOTE) {
-        let Some(end) = rest.find(STRING_QUOTE) else {
-            return Err("unterminated string literal".to_string());
-        };
-        let after = rest[end + STRING_QUOTE.len()..].trim();
-        if !after.is_empty() {
-            return Err(format!(
-                "trailing characters after string literal: `{after}`"
-            ));
-        }
-        return Ok(JsonValue::String(rest[..end].to_string()));
-    }
-    if let Some(stripped) = text.strip_prefix('{') {
-        let inner = stripped
-            .strip_suffix('}')
-            .ok_or_else(|| "unterminated nested object".to_string())?;
-        return parse_object_body(inner);
-    }
-    if let Some(stripped) = text.strip_prefix('[') {
-        let inner = stripped
-            .strip_suffix(']')
-            .ok_or_else(|| "unterminated array".to_string())?;
-        return parse_array_body(inner);
-    }
-    match text {
-        "true" => Ok(JsonValue::Bool(true)),
-        "false" => Ok(JsonValue::Bool(false)),
-        "null" | "None" => Ok(JsonValue::Null),
-        _ => parse_number(text),
-    }
-}
-
-fn parse_array_body(body: &str) -> Result<JsonValue, String> {
-    let body = body.trim();
-    if body.is_empty() {
-        return Ok(JsonValue::Array(Vec::new()));
-    }
-    let mut items = Vec::new();
-    for item in split_top_level(body, ',')? {
-        items.push(parse_value(item)?);
-    }
-    Ok(JsonValue::Array(items))
-}
-
-fn parse_number(text: &str) -> Result<JsonValue, String> {
-    if let Ok(n) = text.parse::<i64>() {
-        return Ok(JsonValue::Number(JsonNumber::from(n)));
-    }
-    if let Ok(n) = text.parse::<u64>() {
-        return Ok(JsonValue::Number(JsonNumber::from(n)));
-    }
-    if let Ok(n) = text.parse::<f64>() {
-        if let Some(num) = JsonNumber::from_f64(n) {
-            return Ok(JsonValue::Number(num));
-        }
-    }
-    Err(format!("unparseable argument value `{text}`"))
-}
-
-/// Split `text` at top-level occurrences of `separator`, respecting:
-/// - balanced `{}` and `[]`
-/// - paired `<|"|>` delimited strings (treated as opaque)
-fn split_top_level(text: &str, separator: char) -> Result<Vec<&str>, String> {
-    let mut parts = Vec::new();
-    let mut start = 0usize;
-    let mut depth_brace = 0usize;
-    let mut depth_bracket = 0usize;
-    let mut in_string = false;
-
-    let bytes = text.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        if in_string {
-            if text[i..].starts_with(STRING_QUOTE) {
-                in_string = false;
-                i += STRING_QUOTE.len();
-                continue;
-            }
-            i += 1;
-            continue;
-        }
-        if text[i..].starts_with(STRING_QUOTE) {
-            in_string = true;
-            i += STRING_QUOTE.len();
-            continue;
-        }
-        let ch = bytes[i] as char;
-        match ch {
-            '{' => depth_brace += 1,
-            '}' => depth_brace = depth_brace.saturating_sub(1),
-            '[' => depth_bracket += 1,
-            ']' => depth_bracket = depth_bracket.saturating_sub(1),
-            c if c == separator && depth_brace == 0 && depth_bracket == 0 => {
-                let part = text[start..i].trim();
-                if !part.is_empty() {
-                    parts.push(part);
-                }
-                start = i + ch.len_utf8();
-                i = start;
-                continue;
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    if in_string || depth_brace != 0 || depth_bracket != 0 {
-        return Err(format!("unterminated tool-call expression: `{text}`"));
-    }
-    let tail = text[start..].trim();
-    if !tail.is_empty() {
-        parts.push(tail);
-    }
-    Ok(parts)
-}
-
-fn find_top_level_colon(text: &str) -> Result<Option<usize>, String> {
-    let mut depth_brace = 0usize;
-    let mut depth_bracket = 0usize;
-    let mut in_string = false;
-    let bytes = text.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        if in_string {
-            if text[i..].starts_with(STRING_QUOTE) {
-                in_string = false;
-                i += STRING_QUOTE.len();
-                continue;
-            }
-            i += 1;
-            continue;
-        }
-        if text[i..].starts_with(STRING_QUOTE) {
-            in_string = true;
-            i += STRING_QUOTE.len();
-            continue;
-        }
-        let ch = bytes[i] as char;
-        match ch {
-            '{' => depth_brace += 1,
-            '}' => depth_brace = depth_brace.saturating_sub(1),
-            '[' => depth_bracket += 1,
-            ']' => depth_bracket = depth_bracket.saturating_sub(1),
-            ':' if depth_brace == 0 && depth_bracket == 0 => return Ok(Some(i)),
-            _ => {}
-        }
-        i += 1;
-    }
-    if in_string || depth_brace != 0 || depth_bracket != 0 {
-        return Err(format!("unterminated tool-call key/value: `{text}`"));
-    }
-    Ok(None)
-}
-
-
-pub fn prepare_messages(
-    _specs: &[ToolSpec],
-    messages: Vec<types::Message>,
-) -> Vec<types::Message> {
-    messages
-}
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::runtime::chat::ToolSpec;
     use serde_json::json;
+
+    /// Universal sentinel-engine scenarios via the shared harness.
+    /// Wire-format-specific cases live in the per-test sections below.
+    #[test]
+    fn passes_universal_scenarios() {
+        use crate::runtime::chat::protocol_test_kit::{ProtocolTestFixture, directory_with_add};
+        ProtocolTestFixture {
+            make_parser: Box::new(make_parser),
+            directory: directory_with_add(),
+            valid_call_add_1_2: r##"<|tool_call>call:add{a:1,b:2}<tool_call|>"##,
+            unknown_tool_call: r##"<|tool_call>call:missing{}<tool_call|>"##,
+            invalid_args_call: r##"<|tool_call>call:add{a:<|"|>x<|"|>,b:2}<tool_call|>"##,
+            malformed_payload: r##"<|tool_call>this isn't valid<tool_call|>"##,
+            open_sentinel_only: Some(r##"<|tool_call>"##),
+        }
+        .run_universal_scenarios();
+    }
 
     fn calculator_tool() -> ToolSpec {
         ToolSpec::new(
@@ -601,20 +145,12 @@ mod tests {
             .expect("expected a Stop event")
     }
 
-    #[test]
-    fn plain_text_passes_through() {
-        let mut p = Gemma4Parser::new(directory());
-        let events = run(&mut p, &["hello world"]);
-        assert_eq!(events.len(), 2);
-        assert!(matches!(&events[0], DecodeEvent::TextDelta(s) if s == "hello world"));
-        assert_eq!(last_stop_reason(&events), StopReason::EndOfText);
-    }
 
     #[test]
     fn valid_call_emits_start_args_end() {
-        let mut p = Gemma4Parser::new(directory());
+        let mut p = make_parser(directory());
         let events = run(
-            &mut p,
+            &mut *p,
             &[r#"<|tool_call>call:calculator{lhs:1353785,op:<|"|>div<|"|>,rhs:790489}<tool_call|>"#],
         );
         let mut iter = events.iter();
@@ -645,7 +181,7 @@ mod tests {
 
     #[test]
     fn call_emitted_atomically_when_close_sentinel_arrives() {
-        let mut p = Gemma4Parser::new(directory());
+        let mut p = make_parser(directory());
         let events = p.feed(
             r#"<|tool_call>call:calculator{lhs:1,op:<|"|>add<|"|>,rhs:2}<tool_call|>"#,
         );
@@ -656,40 +192,13 @@ mod tests {
         assert!(!events.iter().any(|e| matches!(e, DecodeEvent::Stop { .. })));
     }
 
-    #[test]
-    fn unknown_tool_is_terminal() {
-        let mut p = Gemma4Parser::new(directory());
-        let events = run(
-            &mut p,
-            &[r#"<|tool_call>call:delete_db{}<tool_call|>"#],
-        );
-        assert!(matches!(
-            &events[0],
-            DecodeEvent::UnknownTool { name, .. } if name == "delete_db"
-        ));
-        assert_eq!(last_stop_reason(&events), StopReason::ProtocolError);
-    }
 
-    #[test]
-    fn schema_invalid_args_is_terminal() {
-        let mut p = Gemma4Parser::new(directory());
-        let events = run(
-            &mut p,
-            &[r#"<|tool_call>call:calculator{lhs:<|"|>one<|"|>,op:<|"|>add<|"|>,rhs:2}<tool_call|>"#],
-        );
-        let DecodeEvent::InvalidArgs { name, errors, .. } = &events[0] else {
-            panic!("expected InvalidArgs, got {events:?}");
-        };
-        assert_eq!(name, "calculator");
-        assert!(!errors.is_empty());
-        assert_eq!(last_stop_reason(&events), StopReason::ProtocolError);
-    }
 
     #[test]
     fn missing_call_prefix_is_terminal() {
-        let mut p = Gemma4Parser::new(directory());
+        let mut p = make_parser(directory());
         let events = run(
-            &mut p,
+            &mut *p,
             &[r#"<|tool_call>calculator{lhs:1}<tool_call|>"#],
         );
         assert!(matches!(&events[0], DecodeEvent::ParseError { .. }));
@@ -698,9 +207,9 @@ mod tests {
 
     #[test]
     fn unterminated_block_is_terminal() {
-        let mut p = Gemma4Parser::new(directory());
+        let mut p = make_parser(directory());
         let events = run(
-            &mut p,
+            &mut *p,
             &[r#"<|tool_call>call:calculator{lhs:1"#],
         );
         assert!(matches!(
@@ -715,7 +224,7 @@ mod tests {
 
     #[test]
     fn partial_open_sentinel_split_across_feeds() {
-        let mut p = Gemma4Parser::new(directory());
+        let mut p = make_parser(directory());
         let mut events = Vec::new();
         events.extend(p.feed("preamble <|tool_c"));
         events.extend(p.feed(
@@ -734,7 +243,7 @@ mod tests {
 
     #[test]
     fn partial_string_quote_split_across_feeds() {
-        let mut p = Gemma4Parser::new(directory());
+        let mut p = make_parser(directory());
         let mut events = Vec::new();
         events.extend(p.feed(r#"<|tool_call>call:calculator{lhs:1,op:<|"#));
         events.extend(p.feed(r#""|>add<|"|>,rhs:2}<tool_call|>"#));
@@ -753,9 +262,9 @@ mod tests {
 
     #[test]
     fn multiple_calls_in_sequence() {
-        let mut p = Gemma4Parser::new(directory());
+        let mut p = make_parser(directory());
         let events = run(
-            &mut p,
+            &mut *p,
             &[
                 r#"<|tool_call>call:calculator{lhs:1,op:<|"|>add<|"|>,rhs:2}<tool_call|>"#,
                 r#"<|tool_call>call:calculator{lhs:3,op:<|"|>mul<|"|>,rhs:4}<tool_call|>"#,
@@ -781,17 +290,17 @@ mod tests {
             json!({ "type": "object", "properties": {} }),
         );
         let dir = Arc::new(ToolDirectory::new(vec![nullary_tool]).unwrap());
-        let mut p = Gemma4Parser::new(dir);
-        let events = run(&mut p, &[r#"<|tool_call>call:ping{}<tool_call|>"#]);
+        let mut p = make_parser(dir);
+        let events = run(&mut *p, &[r#"<|tool_call>call:ping{}<tool_call|>"#]);
         assert!(matches!(&events[0], DecodeEvent::ToolCallStart { .. }));
         assert_eq!(last_stop_reason(&events), StopReason::EndOfText);
     }
 
     #[test]
     fn raw_text_resembling_call_without_sentinel_is_plain_text() {
-        let mut p = Gemma4Parser::new(directory());
+        let mut p = make_parser(directory());
         let events = run(
-            &mut p,
+            &mut *p,
             &[r#"call:calculator{lhs:1,op:add,rhs:2}"#],
         );
         let mut text = String::new();
@@ -804,16 +313,6 @@ mod tests {
         assert_eq!(last_stop_reason(&events), StopReason::EndOfText);
     }
 
-    #[test]
-    fn after_fatal_subsequent_feed_returns_empty() {
-        let mut p = Gemma4Parser::new(directory());
-        let first = p.feed(r#"<|tool_call>call:nope{}<tool_call|>"#);
-        assert!(matches!(&first[0], DecodeEvent::UnknownTool { .. }));
-        let after = p.feed(r#"<|tool_call>call:calculator{lhs:1,op:<|"|>add<|"|>,rhs:2}<tool_call|>"#);
-        assert!(after.is_empty());
-        let after_finish = p.finish(StopReason::EndOfText);
-        assert!(after_finish.is_empty());
-    }
 
     // -- Real-world failure modes (sourced from the upstream parsers
     //    in vLLM, SGLang, and llama.cpp). See the inline comments for
@@ -845,9 +344,9 @@ mod tests {
     /// (e.g. `tools.shell-exec`). vLLM accepts `[\w\-\.]+`; we match.
     #[test]
     fn function_name_with_dot_and_dash_accepted() {
-        let mut p = Gemma4Parser::new(search_directory());
+        let mut p = make_parser(search_directory());
         let events = run(
-            &mut p,
+            &mut *p,
             &[r#"<|tool_call>call:tools.shell-exec{cmd:<|"|>ls<|"|>}<tool_call|>"#],
         );
         assert!(matches!(
@@ -863,9 +362,9 @@ mod tests {
     /// `tool_call` whose `function.name` it cannot dispatch.
     #[test]
     fn invalid_function_name_charset_is_rejected() {
-        let mut p = Gemma4Parser::new(directory());
+        let mut p = make_parser(directory());
         let events = run(
-            &mut p,
+            &mut *p,
             &[r#"<|tool_call>call:bad name{a:1}<tool_call|>"#],
         );
         let DecodeEvent::ParseError { source, .. } = &events[0] else {
@@ -882,9 +381,9 @@ mod tests {
     /// <|"|>` regions during depth counting — this test pins it.
     #[test]
     fn string_value_with_braces_is_opaque() {
-        let mut p = Gemma4Parser::new(search_directory());
+        let mut p = make_parser(search_directory());
         let events = run(
-            &mut p,
+            &mut *p,
             &[r#"<|tool_call>call:tools.shell-exec{cmd:<|"|>echo {hello, world}<|"|>}<tool_call|>"#],
         );
         let DecodeEvent::ToolCallEnd { args, .. } = events
@@ -901,9 +400,9 @@ mod tests {
     /// inside a `<|"|>...<|"|>` region must not flip array depth.
     #[test]
     fn string_value_with_brackets_is_opaque() {
-        let mut p = Gemma4Parser::new(search_directory());
+        let mut p = make_parser(search_directory());
         let events = run(
-            &mut p,
+            &mut *p,
             &[r#"<|tool_call>call:tools.shell-exec{cmd:<|"|>grep [abc] /etc/hosts<|"|>}<tool_call|>"#],
         );
         let DecodeEvent::ToolCallEnd { args, .. } = events
@@ -920,9 +419,9 @@ mod tests {
     /// every level (`escape_keys=False` propagates).
     #[test]
     fn nested_object_argument() {
-        let mut p = Gemma4Parser::new(search_directory());
+        let mut p = make_parser(search_directory());
         let events = run(
-            &mut p,
+            &mut *p,
             &[r#"<|tool_call>call:tools.shell-exec{cmd:<|"|>ls<|"|>,env:{HOME:<|"|>/root<|"|>,LANG:<|"|>C<|"|>}}<tool_call|>"#],
         );
         let DecodeEvent::ToolCallEnd { args, .. } = events
@@ -940,9 +439,9 @@ mod tests {
     /// separated at the top level of the array by `,`.
     #[test]
     fn array_of_strings_argument() {
-        let mut p = Gemma4Parser::new(search_directory());
+        let mut p = make_parser(search_directory());
         let events = run(
-            &mut p,
+            &mut *p,
             &[r#"<|tool_call>call:tools.shell-exec{cmd:<|"|>cargo<|"|>,args:[<|"|>build<|"|>,<|"|>--release<|"|>]}<tool_call|>"#],
         );
         let DecodeEvent::ToolCallEnd { args, .. } = events
@@ -959,9 +458,9 @@ mod tests {
     /// Booleans arrive as bare `true` / `false`.
     #[test]
     fn boolean_argument() {
-        let mut p = Gemma4Parser::new(search_directory());
+        let mut p = make_parser(search_directory());
         let events = run(
-            &mut p,
+            &mut *p,
             &[r#"<|tool_call>call:tools.shell-exec{cmd:<|"|>ls<|"|>,dry_run:true}<tool_call|>"#],
         );
         let DecodeEvent::ToolCallEnd { args, .. } = events
@@ -990,9 +489,9 @@ mod tests {
             }),
         );
         let dir = Arc::new(ToolDirectory::new(vec![nums]).unwrap());
-        let mut p = Gemma4Parser::new(dir);
+        let mut p = make_parser(dir);
         let events = run(
-            &mut p,
+            &mut *p,
             &[r#"<|tool_call>call:calc{f:-3.14,i:-42}<tool_call|>"#],
         );
         let DecodeEvent::ToolCallEnd { args, .. } = events
@@ -1013,9 +512,9 @@ mod tests {
     /// pointing to the upstream issue rather than silently misparsing.
     #[test]
     fn outdated_double_braced_template_is_rejected_with_hint() {
-        let mut p = Gemma4Parser::new(directory());
+        let mut p = make_parser(directory());
         let events = run(
-            &mut p,
+            &mut *p,
             &[r#"<|tool_call>{{"name":"calculator","arguments":{"lhs":1,"op":"add","rhs":2}}}<tool_call|>"#],
         );
         let DecodeEvent::ParseError { source, .. } = &events[0] else {
@@ -1033,9 +532,9 @@ mod tests {
     /// close sentinel.
     #[test]
     fn trailing_whitespace_in_body_tolerated() {
-        let mut p = Gemma4Parser::new(directory());
+        let mut p = make_parser(directory());
         let events = run(
-            &mut p,
+            &mut *p,
             &[
                 "<|tool_call>call:calculator{lhs:1,op:<|\"|>add<|\"|>,rhs:2}\n<tool_call|>",
             ],
@@ -1049,9 +548,9 @@ mod tests {
     /// must not depend on ordering.
     #[test]
     fn args_in_non_alphabetical_order_parse() {
-        let mut p = Gemma4Parser::new(directory());
+        let mut p = make_parser(directory());
         let events = run(
-            &mut p,
+            &mut *p,
             &[r#"<|tool_call>call:calculator{rhs:2,lhs:1,op:<|"|>add<|"|>}<tool_call|>"#],
         );
         let DecodeEvent::ToolCallEnd { args, .. } = events
@@ -1074,12 +573,12 @@ mod tests {
     #[test]
     fn parsers_have_independent_state() {
         let dir = directory();
-        let mut a = Gemma4Parser::new(dir.clone());
-        let mut b = Gemma4Parser::new(dir);
+        let mut a = make_parser(dir.clone());
+        let mut b = make_parser(dir);
         a.feed(r#"<|tool_call>call:nope{}<tool_call|>"#); // poisons a
         // b must still accept a valid call cleanly.
         let events_b = run(
-            &mut b,
+            &mut *b,
             &[r#"<|tool_call>call:calculator{lhs:1,op:<|"|>add<|"|>,rhs:2}<tool_call|>"#],
         );
         assert!(matches!(&events_b[0], DecodeEvent::ToolCallStart { .. }));
@@ -1105,9 +604,9 @@ mod tests {
     /// 0 and 1 (per `parser_index`); text is `TextDelta`.
     #[test]
     fn parallel_calls_with_interleaved_text() {
-        let mut p = Gemma4Parser::new(directory());
+        let mut p = make_parser(directory());
         let events = run(
-            &mut p,
+            &mut *p,
             &[r#"first <|tool_call>call:calculator{lhs:1,op:<|"|>add<|"|>,rhs:2}<tool_call|> middle <|tool_call>call:calculator{lhs:3,op:<|"|>mul<|"|>,rhs:4}<tool_call|> last"#],
         );
         let starts: Vec<_> = events

@@ -35,34 +35,22 @@
 //!    [`prepare_messages`] injection is needed — identity over the
 //!    message list.
 
+// All production wiring lives in `protocol.rs`'s `SMOLLM3` registry
+// entry. The dialect is `<tool_call>JSON</tool_call>` with the
+// Hermes-permissive codec — same as Qwen3.
+
+#[cfg(test)]
 use std::sync::Arc;
 
-use serde_json::Value as JsonValue;
+#[cfg(test)]
+use crate::runtime::chat::{IncrementalToolCallParser, ToolDirectory};
 
-use crate::runtime::chat::{IncrementalToolCallParser, ToolDirectory, ToolSpec};
-use crate::types;
-
-use super::json_sentinel;
-
-const TOOL_CALL_OPEN: &str = "<tool_call>";
-const TOOL_CALL_CLOSE: &str = "</tool_call>";
-
-/// Construct a SmolLM3 parser bound to the given tool directory.
-pub fn make_parser(directory: Arc<ToolDirectory>) -> Box<dyn IncrementalToolCallParser> {
-    json_sentinel::make_parser(directory, TOOL_CALL_OPEN, TOOL_CALL_CLOSE)
-}
-
-/// Render the bound tool list into the OpenAI-style envelope SmolLM3's
-/// chat template expects — same shape as Qwen3 / SmolLM2.
-pub fn render_tools(specs: &[ToolSpec]) -> JsonValue {
-    json_sentinel::render_openai_tool_envelope(specs)
-}
-
-/// SmolLM3's chat template renders the tool spec into the system
-/// preamble itself, so the protocol does not inject anything. Identity
-/// over the message list.
-pub fn prepare_messages(_specs: &[ToolSpec], messages: Vec<types::Message>) -> Vec<types::Message> {
-    messages
+#[cfg(test)]
+fn make_parser(directory: Arc<ToolDirectory>) -> Box<dyn IncrementalToolCallParser> {
+    use crate::runtime::chat::tool_protocol_for;
+    tool_protocol_for("SmolLM3ForCausalLM", &serde_json::Value::Null)
+        .expect("SmolLM3 arch is registered")
+        .make_parser(directory)
 }
 
 #[cfg(test)]
@@ -72,6 +60,22 @@ mod tests {
         DecodeEvent, IncrementalToolCallParser, StopReason, ToolDirectory, ToolSpec,
     };
     use serde_json::json;
+
+    /// Universal sentinel-engine scenarios via the shared harness.
+    #[test]
+    fn passes_universal_scenarios() {
+        use crate::runtime::chat::protocol_test_kit::{ProtocolTestFixture, directory_with_add};
+        ProtocolTestFixture {
+            make_parser: Box::new(make_parser),
+            directory: directory_with_add(),
+            valid_call_add_1_2: r##"<tool_call>{"name":"add","arguments":{"a":1,"b":2}}</tool_call>"##,
+            unknown_tool_call: r##"<tool_call>{"name":"missing","arguments":{}}</tool_call>"##,
+            invalid_args_call: r##"<tool_call>{"name":"add","arguments":{"a":"x","b":2}}</tool_call>"##,
+            malformed_payload: r##"<tool_call>not json</tool_call>"##,
+            open_sentinel_only: Some(r##"<tool_call>"##),
+        }
+        .run_universal_scenarios();
+    }
 
     fn add_tool() -> ToolSpec {
         ToolSpec::new(
@@ -100,11 +104,7 @@ mod tests {
         assert!(matches!(&events[2], DecodeEvent::ToolCallEnd { .. }));
     }
 
-    #[test]
-    fn prepare_messages_is_identity() {
-        let user = types::Message::OpenAI(Box::new(types::openai::ChatMessage::user("hi")));
-        let messages = prepare_messages(&[add_tool()], vec![user.clone()]);
-        assert_eq!(messages.len(), 1);
-        assert_eq!(&messages[0], &user);
-    }
+    // The identity-prepare_messages contract is covered by the
+    // shared `render::identity_prepare_messages` test — no need to
+    // duplicate per-protocol.
 }

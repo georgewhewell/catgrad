@@ -21,10 +21,15 @@
 //! Per-architecture parser implementations live in
 //! `runtime::chat::protocols::*` (added in subsequent patches).
 
+pub mod codecs;
 mod event;
 mod parser;
 mod protocol;
+#[cfg(test)]
+pub(crate) mod protocol_test_kit;
 pub mod protocols;
+pub mod render;
+pub mod sentinel_engine;
 mod tool_spec;
 mod turn;
 mod turn_accumulator;

@@ -26,25 +26,58 @@
 use std::sync::Arc;
 
 use super::protocols;
+use super::render;
+use super::sentinel_engine::{PayloadCodec, SentinelEngine, SentinelKind};
 use super::{IncrementalToolCallParser, ToolDirectory, ToolSpec};
 use crate::types;
 use serde_json::Value as JsonValue;
 
+/// How the protocol's parser is constructed. The vast majority of
+/// in-tree dialects fit [`Self::Engine`] — sentinel-bounded payload
+/// run through a pluggable [`PayloadCodec`]. The exceptions
+/// ([`protocols::gpt_oss`] harmony channels, [`protocols::llama3`]
+/// bare-JSON streaming) carry a [`Self::Custom`] constructor so they
+/// can implement [`IncrementalToolCallParser`] directly.
+#[derive(Clone, Copy)]
+pub enum ParserShape {
+    /// Sentinel-bounded protocol. The registry stamps out a fresh
+    /// [`SentinelEngine`] per request, holding the sentinel
+    /// description and a fresh codec instance.
+    Engine {
+        sentinel: SentinelKind,
+        codec_factory: fn() -> Box<dyn PayloadCodec>,
+    },
+    /// Hand-rolled parser. The function returns a fresh
+    /// `Box<dyn IncrementalToolCallParser>` per request.
+    Custom(fn(Arc<ToolDirectory>) -> Box<dyn IncrementalToolCallParser>),
+}
+
+impl std::fmt::Debug for ParserShape {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Engine { sentinel, .. } => f
+                .debug_struct("Engine")
+                .field("sentinel", sentinel)
+                .field("codec_factory", &"<fn>")
+                .finish(),
+            Self::Custom(_) => f.write_str("Custom(<fn>)"),
+        }
+    }
+}
+
 /// Capability descriptor for one model architecture's tool-calling
 /// dialect. Stored as a `&'static` to allow callers to compare protocol
 /// identity by pointer when useful.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct ToolCallProtocol {
     /// Shape the bound tool list into the JSON value the chat template
     /// expects. Output is what gets bound to the template's `tools`
-    /// variable; shape is architecture-specific.
+    /// variable; shape is architecture-specific. Most dialects use
+    /// [`render::openai_tool_envelope`].
     pub render_tools: fn(&[ToolSpec]) -> JsonValue,
 
-    /// Construct an incremental parser that owns its tool directory.
-    /// The returned parser is `'static`, so a caller can hold both the
-    /// `ChatTurn` and the parser together (e.g. on a per-request struct
-    /// in a gateway) without a self-referential borrow.
-    pub make_parser: fn(Arc<ToolDirectory>) -> Box<dyn IncrementalToolCallParser>,
+    /// How to construct the protocol's parser. See [`ParserShape`].
+    pub parser: ParserShape,
 
     /// Whether the model can emit multiple tool calls in a single
     /// generation. Surfaces to clients via the gateway as the
@@ -55,21 +88,68 @@ pub struct ToolCallProtocol {
     /// chat template. Used by protocols whose chat template does not
     /// natively iterate `tools` (e.g. SmolLM2's plain ChatML loop): the
     /// protocol injects a system message describing the tools and the
-    /// expected wire format. Default for tool-aware templates (Qwen3):
-    /// identity.
+    /// expected wire format. Most dialects use
+    /// [`render::identity_prepare_messages`].
     pub prepare_messages: fn(&[ToolSpec], Vec<types::Message>) -> Vec<types::Message>,
 }
 
+impl ToolCallProtocol {
+    /// Construct an incremental parser bound to the given directory.
+    /// Single entry point for callers (gateway, examples) — they don't
+    /// need to know whether the protocol uses [`SentinelEngine`] or a
+    /// custom hand-rolled parser.
+    pub fn make_parser(
+        &self,
+        directory: Arc<ToolDirectory>,
+    ) -> Box<dyn IncrementalToolCallParser> {
+        match self.parser {
+            ParserShape::Engine {
+                sentinel,
+                codec_factory,
+            } => Box::new(SentinelEngine::new(directory, codec_factory(), sentinel)),
+            ParserShape::Custom(make) => make(directory),
+        }
+    }
+}
+
+// All 13 in-tree protocols emit the same OpenAI tool-list envelope —
+// `render::openai_tool_envelope` is the universal `render_tools` here.
+//
+// 12 of 13 use identity `prepare_messages`; SmolLM2 is the only
+// dialect that injects a system prompt (its chat template ignores
+// `tools`).
+//
+// Sentinel-bounded protocols use `ParserShape::Engine` with the
+// appropriate codec; the structurally-different ones (gpt_oss
+// harmony channels, llama3 bare-JSON streaming) carry their own
+// `ParserShape::Custom` constructor.
+
 const QWEN3: ToolCallProtocol = ToolCallProtocol {
-    render_tools: protocols::qwen3::render_tools,
-    make_parser: protocols::qwen3::make_parser,
+    render_tools: render::openai_tool_envelope,
+    parser: ParserShape::Engine {
+        sentinel: SentinelKind::Pair {
+            open: "<tool_call>",
+            close: "</tool_call>",
+        },
+        codec_factory: || {
+            Box::new(super::codecs::JsonObjectOrArrayCodec::permissive())
+        },
+    },
     supports_parallel_calls: true,
-    prepare_messages: protocols::qwen3::prepare_messages,
+    prepare_messages: render::identity_prepare_messages,
 };
 
 const SMOLLM2: ToolCallProtocol = ToolCallProtocol {
-    render_tools: protocols::smollm2::render_tools,
-    make_parser: protocols::smollm2::make_parser,
+    render_tools: render::openai_tool_envelope,
+    parser: ParserShape::Engine {
+        sentinel: SentinelKind::Pair {
+            open: "<tool_call>",
+            close: "</tool_call>",
+        },
+        codec_factory: || {
+            Box::new(super::codecs::JsonObjectOrArrayCodec::permissive())
+        },
+    },
     // Small SmolLM2 instruct fine-tunes have not been validated as
     // reliable parallel-call emitters; expose them as serial only.
     supports_parallel_calls: false,
@@ -77,85 +157,154 @@ const SMOLLM2: ToolCallProtocol = ToolCallProtocol {
 };
 
 const SMOLLM3: ToolCallProtocol = ToolCallProtocol {
-    render_tools: protocols::smollm3::render_tools,
-    make_parser: protocols::smollm3::make_parser,
+    render_tools: render::openai_tool_envelope,
+    parser: ParserShape::Engine {
+        sentinel: SentinelKind::Pair {
+            open: "<tool_call>",
+            close: "</tool_call>",
+        },
+        codec_factory: || {
+            Box::new(super::codecs::JsonObjectOrArrayCodec::permissive())
+        },
+    },
     supports_parallel_calls: true,
-    prepare_messages: protocols::smollm3::prepare_messages,
+    prepare_messages: render::identity_prepare_messages,
 };
 
 const LLAMA3: ToolCallProtocol = ToolCallProtocol {
-    render_tools: protocols::llama3::render_tools,
-    make_parser: protocols::llama3::make_parser,
+    render_tools: render::openai_tool_envelope,
+    parser: ParserShape::Custom(protocols::llama3::make_parser),
     // Llama 3's chat template raises if `tool_calls | length != 1`,
     // so the dialect is structurally single-call per turn.
     supports_parallel_calls: false,
-    prepare_messages: protocols::llama3::prepare_messages,
+    prepare_messages: render::identity_prepare_messages,
 };
 
 const LFM2: ToolCallProtocol = ToolCallProtocol {
-    render_tools: protocols::lfm2::render_tools,
-    make_parser: protocols::lfm2::make_parser,
+    render_tools: render::openai_tool_envelope,
+    parser: ParserShape::Engine {
+        sentinel: SentinelKind::Pair {
+            open: "<|tool_call_start|>",
+            close: "<|tool_call_end|>",
+        },
+        // LFM2 emits Pythonic OR JSON inside the sentinels. Try JSON
+        // first (cheaper to fail on non-JSON input), fall back to
+        // Pythonic. Behavior matches the original
+        // `parse_payload_calls` byte-sniff dispatcher.
+        codec_factory: || {
+            Box::new(super::codecs::MultiCodec::new(vec![
+                Box::new(super::codecs::JsonObjectOrArrayCodec::permissive()),
+                Box::new(super::codecs::PythonicCallsCodec),
+            ]))
+        },
+    },
     // LFM2 / LFM2.5 emit a list of calls between a single
     // `<|tool_call_start|>` / `<|tool_call_end|>` pair, so parallel
     // calls in one generation are part of the wire format.
     supports_parallel_calls: true,
-    prepare_messages: protocols::lfm2::prepare_messages,
+    prepare_messages: render::identity_prepare_messages,
 };
 
 const QWEN3_5: ToolCallProtocol = ToolCallProtocol {
-    render_tools: protocols::qwen3_5::render_tools,
-    make_parser: protocols::qwen3_5::make_parser,
+    render_tools: render::openai_tool_envelope,
+    parser: ParserShape::Engine {
+        sentinel: SentinelKind::Pair {
+            open: "<tool_call>",
+            close: "</tool_call>",
+        },
+        codec_factory: || Box::new(super::codecs::XmlFunctionCodec),
+    },
     supports_parallel_calls: true,
-    prepare_messages: protocols::qwen3_5::prepare_messages,
+    prepare_messages: render::identity_prepare_messages,
 };
 
 const OLMO3: ToolCallProtocol = ToolCallProtocol {
-    render_tools: protocols::olmo3::render_tools,
-    make_parser: protocols::olmo3::make_parser,
+    render_tools: render::openai_tool_envelope,
+    parser: ParserShape::Engine {
+        sentinel: SentinelKind::Pair {
+            open: "<function_calls>",
+            close: "</function_calls>",
+        },
+        codec_factory: || Box::new(super::codecs::PythonicCallsCodec),
+    },
     supports_parallel_calls: true,
-    prepare_messages: protocols::olmo3::prepare_messages,
+    prepare_messages: render::identity_prepare_messages,
 };
 
 const NEMOTRON: ToolCallProtocol = ToolCallProtocol {
-    render_tools: protocols::nemotron::render_tools,
-    make_parser: protocols::nemotron::make_parser,
+    render_tools: render::openai_tool_envelope,
+    parser: ParserShape::Engine {
+        sentinel: SentinelKind::Pair {
+            open: "<tool_call>",
+            close: "</tool_call>",
+        },
+        codec_factory: || Box::new(super::codecs::XmlFunctionCodec),
+    },
     supports_parallel_calls: true,
-    prepare_messages: protocols::nemotron::prepare_messages,
+    prepare_messages: render::identity_prepare_messages,
 };
 
 const GRANITE: ToolCallProtocol = ToolCallProtocol {
-    render_tools: protocols::granite::render_tools,
-    make_parser: protocols::granite::make_parser,
+    render_tools: render::openai_tool_envelope,
+    parser: ParserShape::Engine {
+        sentinel: SentinelKind::Prefix {
+            open: "<|tool_call|>",
+        },
+        codec_factory: || {
+            Box::new(super::codecs::JsonObjectOrArrayCodec::strict())
+        },
+    },
     supports_parallel_calls: true,
-    prepare_messages: protocols::granite::prepare_messages,
+    prepare_messages: render::identity_prepare_messages,
 };
 
 const MISTRAL3: ToolCallProtocol = ToolCallProtocol {
-    render_tools: protocols::mistral3::render_tools,
-    make_parser: protocols::mistral3::make_parser,
+    render_tools: render::openai_tool_envelope,
+    parser: ParserShape::Engine {
+        sentinel: SentinelKind::Prefix {
+            open: "[TOOL_CALLS]",
+        },
+        codec_factory: || {
+            Box::new(super::codecs::JsonObjectOrArrayCodec::strict())
+        },
+    },
     supports_parallel_calls: true,
-    prepare_messages: protocols::mistral3::prepare_messages,
+    prepare_messages: render::identity_prepare_messages,
 };
 
 const PHI4: ToolCallProtocol = ToolCallProtocol {
-    render_tools: protocols::phi4::render_tools,
-    make_parser: protocols::phi4::make_parser,
+    render_tools: render::openai_tool_envelope,
+    parser: ParserShape::Engine {
+        sentinel: SentinelKind::Prefix { open: "functools" },
+        codec_factory: || {
+            Box::new(super::codecs::JsonObjectOrArrayCodec::strict())
+        },
+    },
     supports_parallel_calls: true,
-    prepare_messages: protocols::phi4::prepare_messages,
+    prepare_messages: render::identity_prepare_messages,
 };
 
 const GPT_OSS: ToolCallProtocol = ToolCallProtocol {
-    render_tools: protocols::gpt_oss::render_tools,
-    make_parser: protocols::gpt_oss::make_parser,
+    render_tools: render::openai_tool_envelope,
+    parser: ParserShape::Custom(protocols::gpt_oss::make_parser),
     supports_parallel_calls: true,
-    prepare_messages: protocols::gpt_oss::prepare_messages,
+    prepare_messages: render::identity_prepare_messages,
 };
 
 const GEMMA4: ToolCallProtocol = ToolCallProtocol {
-    render_tools: protocols::gemma4::render_tools,
-    make_parser: protocols::gemma4::make_parser,
+    render_tools: render::openai_tool_envelope,
+    parser: ParserShape::Engine {
+        // Asymmetric sentinels: open is `<|tool_call>` (uses `|>`),
+        // close is `<tool_call|>` (uses `<|`). Intentional in the
+        // Gemma 4 wire format — distinct token IDs, not a typo.
+        sentinel: SentinelKind::Pair {
+            open: "<|tool_call>",
+            close: "<tool_call|>",
+        },
+        codec_factory: || Box::new(super::codecs::Gemma4Codec),
+    },
     supports_parallel_calls: true,
-    prepare_messages: protocols::gemma4::prepare_messages,
+    prepare_messages: render::identity_prepare_messages,
 };
 
 /// Lookup table from `(arch, tokenizer_config)` to the architecture's
@@ -373,7 +522,7 @@ mod tests {
     /// `<tool_call>` sentinel — they pass through as plain text.
     fn assert_hermes_style_parser(proto: &'static ToolCallProtocol) {
         let dir = make_test_directory();
-        let mut parser = (proto.make_parser)(dir);
+        let mut parser = proto.make_parser(dir);
         let bare_json = r#"{"name":"ping","arguments":{}}"#;
         let mut events = parser.feed(bare_json);
         events.extend(parser.finish(super::super::StopReason::EndOfText));
@@ -390,7 +539,7 @@ mod tests {
     /// as a tool call.
     fn assert_bare_json_parser(proto: &'static ToolCallProtocol) {
         let dir = make_test_directory();
-        let mut parser = (proto.make_parser)(dir);
+        let mut parser = proto.make_parser(dir);
         let bare_json = r#"{"name":"ping","parameters":{}}"#;
         let mut events = parser.feed(bare_json);
         events.extend(parser.finish(super::super::StopReason::EndOfText));

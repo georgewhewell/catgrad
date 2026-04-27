@@ -314,7 +314,7 @@ mod golden_traces {
     use crate::runtime::chat::wire::anthropic::{AnthropicStreamFrame, AnthropicStreamMapper};
     use crate::runtime::chat::wire::openai::OpenAiStreamMapper;
     use crate::runtime::chat::{ToolDirectory, ToolSpec, protocols::qwen3};
-    use crate::types::anthropic;
+    
     use serde_json::json;
     use std::sync::Arc;
 

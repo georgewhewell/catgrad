@@ -10,7 +10,6 @@
 pub mod gemma4;
 pub mod gpt_oss;
 pub mod granite;
-pub mod json_sentinel;
 pub mod lfm2;
 pub mod llama3;
 pub mod mistral3;

@@ -117,9 +117,8 @@ use serde_json::{Map as JsonMap, Value as JsonValue};
 
 use crate::runtime::chat::{
     DecodeEvent, IncrementalToolCallParser, ParserError, SentinelMatcher, StopReason,
-    ToolDirectory, ToolSpec,
+    ToolDirectory,
 };
-use crate::types;
 
 // --- Special-token strings (exact byte sequences, see module doc) ---
 
@@ -156,33 +155,6 @@ pub fn make_parser(directory: Arc<ToolDirectory>) -> Box<dyn IncrementalToolCall
 /// a TypeScript-namespace block under `namespace functions`. So the
 /// shape is the OpenAI envelope: `{"type":"function","function":{...}}`.
 ///
-/// Reference:
-/// <https://huggingface.co/openai/gpt-oss-20b/raw/main/chat_template.jinja>
-pub fn render_tools(specs: &[ToolSpec]) -> JsonValue {
-    JsonValue::Array(
-        specs
-            .iter()
-            .map(|spec| {
-                let mut function = JsonMap::new();
-                function.insert("name".to_string(), JsonValue::String(spec.name.clone()));
-                if let Some(description) = &spec.description {
-                    function.insert(
-                        "description".to_string(),
-                        JsonValue::String(description.clone()),
-                    );
-                }
-                function.insert("parameters".to_string(), spec.parameters.clone());
-                let mut wrapper = JsonMap::new();
-                wrapper.insert(
-                    "type".to_string(),
-                    JsonValue::String("function".to_string()),
-                );
-                wrapper.insert("function".to_string(), JsonValue::Object(function));
-                JsonValue::Object(wrapper)
-            })
-            .collect(),
-    )
-}
 
 // --- Parser state machine ---
 
@@ -802,12 +774,6 @@ fn boundary_for_one(buf: &str, sentinel: &str) -> usize {
 }
 
 
-pub fn prepare_messages(
-    _specs: &[ToolSpec],
-    messages: Vec<types::Message>,
-) -> Vec<types::Message> {
-    messages
-}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1239,16 +1205,6 @@ mod tests {
         assert_eq!(last_stop_reason(&events), StopReason::EndOfText);
     }
 
-    #[test]
-    fn render_tools_produces_openai_envelope() {
-        let rendered = render_tools(&[add_tool()]);
-        let arr = rendered.as_array().unwrap();
-        assert_eq!(arr.len(), 1);
-        assert_eq!(arr[0]["type"], json!("function"));
-        assert_eq!(arr[0]["function"]["name"], json!("add"));
-        assert_eq!(arr[0]["function"]["description"], json!("add two numbers"));
-        assert!(arr[0]["function"]["parameters"].is_object());
-    }
 
     #[test]
     fn parse_channel_header_extracts_channel_and_recipient() {

@@ -40,40 +40,28 @@
 //! returns the passthrough parser and this protocol is never
 //! instantiated, so the no-tools case is structurally clean.
 
+// All production wiring (sentinel strings, codec choice, render_tools,
+// prepare_messages) lives in `protocol.rs`'s `QWEN3` registry entry —
+// this module is purely test scaffolding now. The Qwen3 dialect is
+// `<tool_call>JSON</tool_call>` with the Hermes-permissive codec
+// (empty `[]` → zero calls, OpenAI spec-shape echo peeled).
+
+#[cfg(test)]
 use std::sync::Arc;
 
-use serde_json::Value as JsonValue;
+#[cfg(test)]
+use crate::runtime::chat::{IncrementalToolCallParser, ToolDirectory};
 
-use crate::runtime::chat::{IncrementalToolCallParser, ToolDirectory, ToolSpec};
-use crate::types;
-
-use super::json_sentinel;
-
-pub(super) const TOOL_CALL_OPEN: &str = "<tool_call>";
-pub(super) const TOOL_CALL_CLOSE: &str = "</tool_call>";
-
-/// Construct a Qwen3 parser bound to the given tool directory.
-///
-/// The parser owns the `Arc<ToolDirectory>`, so the returned
-/// `Box<dyn IncrementalToolCallParser>` is `'static`.
-pub fn make_parser(directory: Arc<ToolDirectory>) -> Box<dyn IncrementalToolCallParser> {
-    json_sentinel::make_parser(directory, TOOL_CALL_OPEN, TOOL_CALL_CLOSE)
-}
-
-/// Render the bound tool list into the JSON shape the Qwen3 chat
-/// templates expect — the OpenAI-style `[{"type": "function",
-/// "function": {...}}, ...]` envelope. The chat template iterates over
-/// `tools` and reads `tool.function.name`, `tool.function.description`,
-/// `tool.function.parameters`.
-pub fn render_tools(specs: &[ToolSpec]) -> JsonValue {
-    json_sentinel::render_openai_tool_envelope(specs)
-}
-
-/// Qwen3's chat template natively renders the tool list, so the
-/// protocol does not need to inject any system-prompt scaffolding.
-/// Identity over the message list.
-pub fn prepare_messages(_specs: &[ToolSpec], messages: Vec<types::Message>) -> Vec<types::Message> {
-    messages
+/// Test-only constructor: dispatches through the registry so the
+/// tests exercise the same parser path the gateway will use.
+/// Crate-public so the wire-mapper tests can build a Qwen3 parser
+/// without duplicating the registry lookup.
+#[cfg(test)]
+pub(crate) fn make_parser(directory: Arc<ToolDirectory>) -> Box<dyn IncrementalToolCallParser> {
+    use crate::runtime::chat::tool_protocol_for;
+    tool_protocol_for("Qwen3ForCausalLM", &serde_json::Value::Null)
+        .expect("Qwen3 arch is registered")
+        .make_parser(directory)
 }
 
 #[cfg(test)]
@@ -84,7 +72,24 @@ mod tests {
     };
     use serde_json::json;
 
-    use super::super::json_sentinel::MAX_TOOL_CALL_PAYLOAD_BYTES;
+    use crate::runtime::chat::sentinel_engine::MAX_TOOL_CALL_PAYLOAD_BYTES;
+
+    /// Universal sentinel-engine scenarios via the shared harness.
+    /// Wire-format-specific cases live in the per-test sections below.
+    #[test]
+    fn passes_universal_scenarios() {
+        use crate::runtime::chat::protocol_test_kit::{ProtocolTestFixture, directory_with_add};
+        ProtocolTestFixture {
+            make_parser: Box::new(make_parser),
+            directory: directory_with_add(),
+            valid_call_add_1_2: r##"<tool_call>{"name":"add","arguments":{"a":1,"b":2}}</tool_call>"##,
+            unknown_tool_call: r##"<tool_call>{"name":"missing","arguments":{}}</tool_call>"##,
+            invalid_args_call: r##"<tool_call>{"name":"add","arguments":{"a":"x","b":2}}</tool_call>"##,
+            malformed_payload: r##"<tool_call>not json</tool_call>"##,
+            open_sentinel_only: Some(r##"<tool_call>"##),
+        }
+        .run_universal_scenarios();
+    }
 
     fn add_tool() -> ToolSpec {
         ToolSpec::new(
@@ -126,15 +131,6 @@ mod tests {
             .expect("expected a Stop event")
     }
 
-    #[test]
-    fn plain_text_passes_through_as_text_delta() {
-        let dir = directory_with_add();
-        let mut p = make_parser(dir);
-        let events = run(&mut *p, &["hello world"]);
-        assert_eq!(events.len(), 2);
-        assert!(matches!(&events[0], DecodeEvent::TextDelta(s) if s == "hello world"));
-        assert_eq!(last_stop_reason(&events), StopReason::EndOfText);
-    }
 
     #[test]
     fn valid_call_emits_start_args_end() {
@@ -167,48 +163,8 @@ mod tests {
         assert!(!events.iter().any(|e| matches!(e, DecodeEvent::Stop { .. })));
     }
 
-    #[test]
-    fn unknown_tool_is_terminal_with_protocol_error() {
-        let dir = directory_with_add();
-        let mut p = make_parser(dir);
-        let events = run(
-            &mut *p,
-            &[r#"<tool_call>{"name":"delete_db","arguments":{}}</tool_call>"#],
-        );
-        assert_eq!(events.len(), 2);
-        assert!(matches!(
-            &events[0],
-            DecodeEvent::UnknownTool { name, .. } if name == "delete_db"
-        ));
-        assert_eq!(last_stop_reason(&events), StopReason::ProtocolError);
-    }
 
-    #[test]
-    fn schema_invalid_args_is_terminal_with_protocol_error() {
-        let dir = directory_with_add();
-        let mut p = make_parser(dir);
-        let events = run(
-            &mut *p,
-            &[r#"<tool_call>{"name":"add","arguments":{"a":"one"}}</tool_call>"#],
-        );
-        assert_eq!(events.len(), 2);
-        let DecodeEvent::InvalidArgs { name, errors, .. } = &events[0] else {
-            panic!("expected InvalidArgs, got {events:?}");
-        };
-        assert_eq!(name, "add");
-        assert!(!errors.is_empty());
-        assert_eq!(last_stop_reason(&events), StopReason::ProtocolError);
-    }
 
-    #[test]
-    fn malformed_json_is_terminal_with_protocol_error() {
-        let dir = directory_with_add();
-        let mut p = make_parser(dir);
-        let events = run(&mut *p, &["<tool_call>not json at all</tool_call>"]);
-        assert_eq!(events.len(), 2);
-        assert!(matches!(&events[0], DecodeEvent::ParseError { .. }));
-        assert_eq!(last_stop_reason(&events), StopReason::ProtocolError);
-    }
 
     #[test]
     fn missing_name_field_is_terminal_with_protocol_error() {
@@ -427,27 +383,6 @@ mod tests {
         assert_eq!(last_stop_reason(&events), StopReason::ProtocolError);
     }
 
-    #[test]
-    fn after_fatal_error_subsequent_feed_and_finish_return_empty() {
-        let dir = directory_with_add();
-        let mut p = make_parser(dir);
-        // Trigger fatal via unknown tool.
-        let first = p.feed(r#"<tool_call>{"name":"x","arguments":{}}</tool_call>"#);
-        assert!(matches!(&first[0], DecodeEvent::UnknownTool { .. }));
-        assert!(matches!(
-            &first[1],
-            DecodeEvent::Stop {
-                reason: StopReason::ProtocolError
-            }
-        ));
-        let after_feed = p.feed("any further text");
-        assert!(after_feed.is_empty(), "got events: {after_feed:?}");
-        let after_more =
-            p.feed(r#"<tool_call>{"name":"add","arguments":{"a":1,"b":2}}</tool_call>"#);
-        assert!(after_more.is_empty(), "got events: {after_more:?}");
-        let after_finish = p.finish(StopReason::EndOfText);
-        assert!(after_finish.is_empty(), "got events: {after_finish:?}");
-    }
 
     #[test]
     fn payload_over_limit_without_close_is_terminal() {

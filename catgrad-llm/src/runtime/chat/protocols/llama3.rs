@@ -58,7 +58,7 @@ use crate::runtime::chat::{
 };
 use crate::types;
 
-use super::json_sentinel;
+use crate::runtime::chat::codecs::json::peel_spec_shape_echo;
 
 /// Optional prefix that the Llama 3 reasoning models emit before the
 /// JSON body. We strip it before deciding whether the body is a tool
@@ -77,13 +77,6 @@ pub fn make_parser(directory: Arc<ToolDirectory>) -> Box<dyn IncrementalToolCall
     Box::new(Llama3Parser::new(directory))
 }
 
-/// Llama 3's chat template iterates `tools` and emits
-/// `tool | tojson(indent=4)` directly. The OpenAI-style envelope
-/// `[{"type":"function","function":{...}}, ...]` matches what the
-/// template expects to find under each iteration.
-pub fn render_tools(specs: &[ToolSpec]) -> JsonValue {
-    json_sentinel::render_openai_tool_envelope(specs)
-}
 
 /// Llama 3's chat template renders tool definitions itself when the
 /// `tools` variable is bound. Identity over the message list.
@@ -367,7 +360,7 @@ fn build_call_events(
     value: JsonValue,
     directory: &ToolDirectory,
 ) -> Result<Vec<DecodeEvent>, DecodeEvent> {
-    let object = json_sentinel::peel_spec_shape_echo(value).ok_or_else(|| {
+    let object = peel_spec_shape_echo(value).ok_or_else(|| {
         DecodeEvent::ParseError {
             sentinel: PYTHON_TAG,
             source: ParserError::Malformed("not a JSON object".into()),
