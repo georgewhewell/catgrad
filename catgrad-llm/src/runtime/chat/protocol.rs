@@ -48,6 +48,15 @@ const QWEN3: ToolCallProtocol = ToolCallProtocol {
     supports_parallel_calls: true,
 };
 
+const LFM2: ToolCallProtocol = ToolCallProtocol {
+    render_tools: protocols::lfm2::render_tools,
+    make_parser: protocols::lfm2::make_parser,
+    // LFM2 / LFM2.5 emit a list of calls between a single
+    // `<|tool_call_start|>` / `<|tool_call_end|>` pair, so parallel
+    // calls in one generation are part of the wire format.
+    supports_parallel_calls: true,
+};
+
 /// Lookup table from HF `architectures[0]` string to the architecture's
 /// tool-call protocol. Returns `None` for architectures that do not
 /// support tool calling (or that have not yet been ported to the
@@ -55,6 +64,9 @@ const QWEN3: ToolCallProtocol = ToolCallProtocol {
 pub fn tool_protocol_for(arch: &str) -> Option<&'static ToolCallProtocol> {
     match arch {
         "Qwen3ForCausalLM" | "Qwen3MoeForCausalLM" => Some(&QWEN3),
+        // LFM2 (text-only) and LFM2-VL share the same tool-call wire
+        // format; both use the same protocol.
+        "Lfm2ForCausalLM" | "Lfm2VlForConditionalGeneration" => Some(&LFM2),
         _ => None,
     }
 }
@@ -70,9 +82,14 @@ mod tests {
     }
 
     #[test]
+    fn lfm2_architectures_resolve_to_protocol() {
+        assert!(tool_protocol_for("Lfm2ForCausalLM").is_some());
+        assert!(tool_protocol_for("Lfm2VlForConditionalGeneration").is_some());
+    }
+
+    #[test]
     fn unknown_architecture_returns_none() {
         assert!(tool_protocol_for("Qwen3_5ForConditionalGeneration").is_none());
-        assert!(tool_protocol_for("Lfm2ForCausalLM").is_none());
         assert!(tool_protocol_for("Olmo3ForCausalLM").is_none());
         assert!(tool_protocol_for("LlamaForCausalLM").is_none());
         assert!(tool_protocol_for("").is_none());

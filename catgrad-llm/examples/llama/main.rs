@@ -510,6 +510,10 @@ fn run_with_backend<B: interpreter::Backend>(
                 benchmarking: false,
                 stream_output: false,
                 multimodal_ctx: None,
+                // First-turn output is fed to the tool-call parser, which
+                // matches sentinels like `<|tool_call_start|>`; those are
+                // tokenizer special tokens, so we must NOT strip them.
+                preserve_special_tokens: true,
             },
         )?;
 
@@ -604,6 +608,8 @@ fn run_with_backend<B: interpreter::Backend>(
                     benchmarking: false,
                     stream_output: true,
                     multimodal_ctx: None,
+                    // Final user-facing answer: hide special tokens.
+                    preserve_special_tokens: false,
                 },
             )?;
             println!();
@@ -630,6 +636,7 @@ fn run_with_backend<B: interpreter::Backend>(
                 benchmarking,
                 stream_output: !benchmarking,
                 multimodal_ctx: multimodal_ctx.as_ref(),
+                preserve_special_tokens: false,
             },
         )?;
         if benchmarking {
@@ -700,6 +707,11 @@ struct GenerationConfig<'a, B: interpreter::Backend> {
     benchmarking: bool,
     stream_output: bool,
     multimodal_ctx: Option<&'a MultimodalRuntime<B>>,
+    /// When true, tokenizer.decode is called with skip_special_tokens=false
+    /// so the streaming tool-call parser can see sentinels like
+    /// `<|tool_call_start|>`. The default (false) strips those tokens
+    /// for normal user-facing output.
+    preserve_special_tokens: bool,
 }
 
 fn generate_stream<B: interpreter::Backend>(
@@ -759,7 +771,9 @@ fn generate_stream<B: interpreter::Backend>(
         if config.multimodal_ctx.is_some() && config.use_kv_cache {
             use_image_embeddings = false;
         }
-        let decoded_token = tokenizer.decode(&[next_token_id], true).unwrap();
+        let decoded_token = tokenizer
+            .decode(&[next_token_id], !config.preserve_special_tokens)
+            .unwrap();
         output.push_str(&decoded_token);
         if config.stream_output {
             print!("{decoded_token}");
