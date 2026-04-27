@@ -7,6 +7,7 @@
 //! patch) consults the [`tool_protocol_for`](super::tool_protocol_for)
 //! registry and rejects the turn at construction time.
 
+pub mod gemma4;
 pub mod qwen3;
 
 #[cfg(test)]

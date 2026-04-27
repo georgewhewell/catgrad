@@ -509,6 +509,7 @@ fn run_with_backend<B: interpreter::Backend>(
                 use_kv_cache: true,
                 benchmarking: false,
                 stream_output: false,
+                skip_special_tokens: false,
                 multimodal_ctx: None,
             },
         )?;
@@ -603,6 +604,7 @@ fn run_with_backend<B: interpreter::Backend>(
                     use_kv_cache: true,
                     benchmarking: false,
                     stream_output: true,
+                    skip_special_tokens: true,
                     multimodal_ctx: None,
                 },
             )?;
@@ -629,6 +631,7 @@ fn run_with_backend<B: interpreter::Backend>(
                 use_kv_cache,
                 benchmarking,
                 stream_output: !benchmarking,
+                skip_special_tokens: true,
                 multimodal_ctx: multimodal_ctx.as_ref(),
             },
         )?;
@@ -699,6 +702,11 @@ struct GenerationConfig<'a, B: interpreter::Backend> {
     use_kv_cache: bool,
     benchmarking: bool,
     stream_output: bool,
+    /// Skip special tokens during incremental detokenization. The
+    /// tool-use first turn sets this to false so wire-format sentinels
+    /// that the tokenizer marks `special: true` (e.g. Gemma 4's
+    /// `<|tool_call>` / `<tool_call|>` / `<|"|>`) survive to the parser.
+    skip_special_tokens: bool,
     multimodal_ctx: Option<&'a MultimodalRuntime<B>>,
 }
 
@@ -759,7 +767,9 @@ fn generate_stream<B: interpreter::Backend>(
         if config.multimodal_ctx.is_some() && config.use_kv_cache {
             use_image_embeddings = false;
         }
-        let decoded_token = tokenizer.decode(&[next_token_id], true).unwrap();
+        let decoded_token = tokenizer
+            .decode(&[next_token_id], config.skip_special_tokens)
+            .unwrap();
         output.push_str(&decoded_token);
         if config.stream_output {
             print!("{decoded_token}");

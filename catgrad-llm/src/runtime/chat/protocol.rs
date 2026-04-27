@@ -48,6 +48,12 @@ const QWEN3: ToolCallProtocol = ToolCallProtocol {
     supports_parallel_calls: true,
 };
 
+const GEMMA4: ToolCallProtocol = ToolCallProtocol {
+    render_tools: protocols::gemma4::render_tools,
+    make_parser: protocols::gemma4::make_parser,
+    supports_parallel_calls: true,
+};
+
 /// Lookup table from HF `architectures[0]` string to the architecture's
 /// tool-call protocol. Returns `None` for architectures that do not
 /// support tool calling (or that have not yet been ported to the
@@ -55,6 +61,7 @@ const QWEN3: ToolCallProtocol = ToolCallProtocol {
 pub fn tool_protocol_for(arch: &str) -> Option<&'static ToolCallProtocol> {
     match arch {
         "Qwen3ForCausalLM" | "Qwen3MoeForCausalLM" => Some(&QWEN3),
+        "Gemma4ForConditionalGeneration" => Some(&GEMMA4),
         _ => None,
     }
 }
@@ -67,6 +74,11 @@ mod tests {
     fn qwen3_architectures_resolve_to_protocol() {
         assert!(tool_protocol_for("Qwen3ForCausalLM").is_some());
         assert!(tool_protocol_for("Qwen3MoeForCausalLM").is_some());
+    }
+
+    #[test]
+    fn gemma4_architecture_resolves_to_protocol() {
+        assert!(tool_protocol_for("Gemma4ForConditionalGeneration").is_some());
     }
 
     #[test]
