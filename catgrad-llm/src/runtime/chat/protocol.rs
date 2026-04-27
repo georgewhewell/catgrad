@@ -92,6 +92,65 @@ const LLAMA3: ToolCallProtocol = ToolCallProtocol {
     prepare_messages: protocols::llama3::prepare_messages,
 };
 
+const LFM2: ToolCallProtocol = ToolCallProtocol {
+    render_tools: protocols::lfm2::render_tools,
+    make_parser: protocols::lfm2::make_parser,
+    // LFM2 / LFM2.5 emit a list of calls between a single
+    // `<|tool_call_start|>` / `<|tool_call_end|>` pair, so parallel
+    // calls in one generation are part of the wire format.
+    supports_parallel_calls: true,
+    prepare_messages: protocols::lfm2::prepare_messages,
+};
+
+const QWEN3_5: ToolCallProtocol = ToolCallProtocol {
+    render_tools: protocols::qwen3_5::render_tools,
+    make_parser: protocols::qwen3_5::make_parser,
+    supports_parallel_calls: true,
+    prepare_messages: protocols::qwen3_5::prepare_messages,
+};
+
+const OLMO3: ToolCallProtocol = ToolCallProtocol {
+    render_tools: protocols::olmo3::render_tools,
+    make_parser: protocols::olmo3::make_parser,
+    supports_parallel_calls: true,
+    prepare_messages: protocols::olmo3::prepare_messages,
+};
+
+const NEMOTRON: ToolCallProtocol = ToolCallProtocol {
+    render_tools: protocols::nemotron::render_tools,
+    make_parser: protocols::nemotron::make_parser,
+    supports_parallel_calls: true,
+    prepare_messages: protocols::nemotron::prepare_messages,
+};
+
+const GRANITE: ToolCallProtocol = ToolCallProtocol {
+    render_tools: protocols::granite::render_tools,
+    make_parser: protocols::granite::make_parser,
+    supports_parallel_calls: true,
+    prepare_messages: protocols::granite::prepare_messages,
+};
+
+const MISTRAL3: ToolCallProtocol = ToolCallProtocol {
+    render_tools: protocols::mistral3::render_tools,
+    make_parser: protocols::mistral3::make_parser,
+    supports_parallel_calls: true,
+    prepare_messages: protocols::mistral3::prepare_messages,
+};
+
+const PHI4: ToolCallProtocol = ToolCallProtocol {
+    render_tools: protocols::phi4::render_tools,
+    make_parser: protocols::phi4::make_parser,
+    supports_parallel_calls: true,
+    prepare_messages: protocols::phi4::prepare_messages,
+};
+
+const GPT_OSS: ToolCallProtocol = ToolCallProtocol {
+    render_tools: protocols::gpt_oss::render_tools,
+    make_parser: protocols::gpt_oss::make_parser,
+    supports_parallel_calls: true,
+    prepare_messages: protocols::gpt_oss::prepare_messages,
+};
+
 /// Lookup table from `(arch, tokenizer_config)` to the architecture's
 /// tool-call protocol. Returns `None` for architectures that do not
 /// support tool calling (or that have not yet been ported to the
@@ -109,6 +168,29 @@ pub fn tool_protocol_for(
 ) -> Option<&'static ToolCallProtocol> {
     match arch {
         "Qwen3ForCausalLM" | "Qwen3MoeForCausalLM" => Some(&QWEN3),
+        // Qwen3.5 family — text and conditional-generation variants
+        // share the same XML-in-`<tool_call>` dialect.
+        "Qwen3_5ForCausalLM"
+        | "Qwen3_5MoeForCausalLM"
+        | "Qwen3_5ForConditionalGeneration"
+        | "Qwen3_5MoeForConditionalGeneration" => Some(&QWEN3_5),
+        // LFM2 (text-only) and LFM2-VL share the same tool-call wire
+        // format; both use the same protocol.
+        "Lfm2ForCausalLM" | "Lfm2VlForConditionalGeneration" => Some(&LFM2),
+        // OLMo 3 — Pythonic in `<function_calls>...</function_calls>`.
+        "Olmo3ForCausalLM" => Some(&OLMO3),
+        // Nemotron / Nemotron-H — Hermes-style JSON in `<tool_call>`.
+        "NemotronForCausalLM" | "NemotronHForCausalLM" => Some(&NEMOTRON),
+        // IBM Granite 3.x — JSON list after `<|tool_call|>`.
+        "GraniteForCausalLM" | "GraniteMoeForCausalLM" => Some(&GRANITE),
+        // Mistral / Ministral with `[TOOL_CALLS]` prefix sentinel.
+        "MistralForCausalLM" | "Mistral3ForCausalLM" | "Ministral3ForCausalLM" => {
+            Some(&MISTRAL3)
+        }
+        // Phi-3 / Phi-4-mini — `functools[...]` prefix sentinel.
+        "Phi3ForCausalLM" | "Phi4ForCausalLM" => Some(&PHI4),
+        // gpt-oss harmony channels.
+        "GptOssForCausalLM" => Some(&GPT_OSS),
         "SmolLM3ForCausalLM" => Some(&SMOLLM3),
         "LlamaForCausalLM" => match extract_bos_token(tokenizer_config) {
             // SmolLM2-Instruct: ChatML tokens, no native tools in
@@ -145,11 +227,30 @@ mod tests {
     }
 
     #[test]
+    fn lfm2_architectures_resolve_to_protocol() {
+        let cfg = JsonValue::Null;
+        assert!(tool_protocol_for("Lfm2ForCausalLM", &cfg).is_some());
+        assert!(tool_protocol_for("Lfm2VlForConditionalGeneration", &cfg).is_some());
+    }
+
+    #[test]
+    fn extended_architectures_resolve_to_protocol() {
+        let cfg = JsonValue::Null;
+        assert!(tool_protocol_for("Qwen3_5ForConditionalGeneration", &cfg).is_some());
+        assert!(tool_protocol_for("Olmo3ForCausalLM", &cfg).is_some());
+        assert!(tool_protocol_for("NemotronHForCausalLM", &cfg).is_some());
+        assert!(tool_protocol_for("GraniteForCausalLM", &cfg).is_some());
+        assert!(tool_protocol_for("MistralForCausalLM", &cfg).is_some());
+        assert!(tool_protocol_for("Phi3ForCausalLM", &cfg).is_some());
+        assert!(tool_protocol_for("GptOssForCausalLM", &cfg).is_some());
+    }
+
+    #[test]
     fn unknown_architecture_returns_none() {
         let cfg = JsonValue::Null;
-        assert!(tool_protocol_for("Qwen3_5ForConditionalGeneration", &cfg).is_none());
-        assert!(tool_protocol_for("Lfm2ForCausalLM", &cfg).is_none());
-        assert!(tool_protocol_for("Olmo3ForCausalLM", &cfg).is_none());
+        // Gemma3 / DeepseekV3 — no tool dialect registered yet.
+        assert!(tool_protocol_for("Gemma3ForCausalLM", &cfg).is_none());
+        assert!(tool_protocol_for("DeepseekV3ForCausalLM", &cfg).is_none());
         assert!(tool_protocol_for("", &cfg).is_none());
     }
 
