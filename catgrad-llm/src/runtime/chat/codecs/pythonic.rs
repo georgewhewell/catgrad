@@ -176,64 +176,16 @@ fn parse_python_string(text: &str) -> Result<String, ParserError> {
 }
 
 /// Split `text` on `separator`, respecting nesting in brackets/parens/
-/// braces and quoted strings. Empty parts (e.g. trailing comma) are
-/// dropped.
+/// braces and quoted strings. Delegates to the shared
+/// [`super::balanced_lexer`] with the Pythonic config; `separator` is
+/// used to override the default `,` for callers that want a different
+/// top-level separator (currently no in-tree caller does, but the
+/// signature is preserved for clarity).
 pub(crate) fn split_top_level(text: &str, separator: char) -> Result<Vec<&str>, ParserError> {
-    let mut parts = Vec::new();
-    let mut start = 0;
-    let mut depth_paren = 0usize;
-    let mut depth_bracket = 0usize;
-    let mut depth_brace = 0usize;
-    let mut in_quote: Option<char> = None;
-    let mut escaped = false;
-
-    for (idx, ch) in text.char_indices() {
-        if let Some(quote) = in_quote {
-            if escaped {
-                escaped = false;
-                continue;
-            }
-            if ch == '\\' {
-                escaped = true;
-                continue;
-            }
-            if ch == quote {
-                in_quote = None;
-            }
-            continue;
-        }
-        match ch {
-            '\'' | '"' => in_quote = Some(ch),
-            '(' => depth_paren += 1,
-            ')' => depth_paren = depth_paren.saturating_sub(1),
-            '[' => depth_bracket += 1,
-            ']' => depth_bracket = depth_bracket.saturating_sub(1),
-            '{' => depth_brace += 1,
-            '}' => depth_brace = depth_brace.saturating_sub(1),
-            _ if ch == separator
-                && depth_paren == 0
-                && depth_bracket == 0
-                && depth_brace == 0 =>
-            {
-                let part = text[start..idx].trim();
-                if !part.is_empty() {
-                    parts.push(part);
-                }
-                start = idx + ch.len_utf8();
-            }
-            _ => {}
-        }
-    }
-    if in_quote.is_some() || depth_paren != 0 || depth_bracket != 0 || depth_brace != 0 {
-        return Err(ParserError::Malformed(format!(
-            "unterminated tool-call expression: {text}"
-        )));
-    }
-    let part = text[start..].trim();
-    if !part.is_empty() {
-        parts.push(part);
-    }
-    Ok(parts)
+    let mut cfg = super::balanced_lexer::BalancedConfig::PYTHONIC;
+    cfg.separator = separator;
+    super::balanced_lexer::split_top_level(text, &cfg)
+        .map_err(ParserError::Malformed)
 }
 
 #[cfg(test)]
@@ -287,44 +239,11 @@ mod tests {
 }
 
 pub(crate) fn find_top_level_char(text: &str, needle: char) -> Option<usize> {
-    let mut depth_paren = 0usize;
-    let mut depth_bracket = 0usize;
-    let mut depth_brace = 0usize;
-    let mut in_quote: Option<char> = None;
-    let mut escaped = false;
-
-    for (idx, ch) in text.char_indices() {
-        if let Some(quote) = in_quote {
-            if escaped {
-                escaped = false;
-                continue;
-            }
-            if ch == '\\' {
-                escaped = true;
-                continue;
-            }
-            if ch == quote {
-                in_quote = None;
-            }
-            continue;
-        }
-        match ch {
-            '\'' | '"' => in_quote = Some(ch),
-            '(' => depth_paren += 1,
-            ')' => depth_paren = depth_paren.saturating_sub(1),
-            '[' => depth_bracket += 1,
-            ']' => depth_bracket = depth_bracket.saturating_sub(1),
-            '{' => depth_brace += 1,
-            '}' => depth_brace = depth_brace.saturating_sub(1),
-            _ if ch == needle
-                && depth_paren == 0
-                && depth_bracket == 0
-                && depth_brace == 0 =>
-            {
-                return Some(idx);
-            }
-            _ => {}
-        }
-    }
-    None
+    super::balanced_lexer::find_top_level(
+        text,
+        needle,
+        &super::balanced_lexer::BalancedConfig::PYTHONIC,
+    )
+    .ok()
+    .flatten()
 }

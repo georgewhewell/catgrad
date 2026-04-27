@@ -191,95 +191,21 @@ fn parse_number(text: &str) -> Result<JsonValue, String> {
     Err(format!("unparseable argument value `{text}`"))
 }
 
-/// Split `text` at top-level occurrences of `separator`, respecting
-/// balanced `{}` / `[]` and paired `<|"|>` strings.
+// Bracket / quote / separator walking is delegated to the shared
+// [`super::balanced_lexer`] with the Gemma 4 config (paired
+// `<|"|>` strings, no parens). Per-protocol code shrinks to the
+// narrow Gemma-specific bits (the `call:` prefix and `<|"|>`-quoted
+// string handling done at value level).
 fn split_top_level(text: &str, separator: char) -> Result<Vec<&str>, String> {
-    let mut parts = Vec::new();
-    let mut start = 0usize;
-    let mut depth_brace = 0usize;
-    let mut depth_bracket = 0usize;
-    let mut in_string = false;
-
-    let bytes = text.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        if in_string {
-            if text[i..].starts_with(STRING_QUOTE) {
-                in_string = false;
-                i += STRING_QUOTE.len();
-                continue;
-            }
-            i += 1;
-            continue;
-        }
-        if text[i..].starts_with(STRING_QUOTE) {
-            in_string = true;
-            i += STRING_QUOTE.len();
-            continue;
-        }
-        let ch = bytes[i] as char;
-        match ch {
-            '{' => depth_brace += 1,
-            '}' => depth_brace = depth_brace.saturating_sub(1),
-            '[' => depth_bracket += 1,
-            ']' => depth_bracket = depth_bracket.saturating_sub(1),
-            c if c == separator && depth_brace == 0 && depth_bracket == 0 => {
-                let part = text[start..i].trim();
-                if !part.is_empty() {
-                    parts.push(part);
-                }
-                start = i + ch.len_utf8();
-                i = start;
-                continue;
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    if in_string || depth_brace != 0 || depth_bracket != 0 {
-        return Err(format!("unterminated tool-call expression: `{text}`"));
-    }
-    let tail = text[start..].trim();
-    if !tail.is_empty() {
-        parts.push(tail);
-    }
-    Ok(parts)
+    let mut cfg = super::balanced_lexer::BalancedConfig::GEMMA4;
+    cfg.separator = separator;
+    super::balanced_lexer::split_top_level(text, &cfg)
 }
 
 fn find_top_level_colon(text: &str) -> Result<Option<usize>, String> {
-    let mut depth_brace = 0usize;
-    let mut depth_bracket = 0usize;
-    let mut in_string = false;
-    let bytes = text.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        if in_string {
-            if text[i..].starts_with(STRING_QUOTE) {
-                in_string = false;
-                i += STRING_QUOTE.len();
-                continue;
-            }
-            i += 1;
-            continue;
-        }
-        if text[i..].starts_with(STRING_QUOTE) {
-            in_string = true;
-            i += STRING_QUOTE.len();
-            continue;
-        }
-        let ch = bytes[i] as char;
-        match ch {
-            '{' => depth_brace += 1,
-            '}' => depth_brace = depth_brace.saturating_sub(1),
-            '[' => depth_bracket += 1,
-            ']' => depth_bracket = depth_bracket.saturating_sub(1),
-            ':' if depth_brace == 0 && depth_bracket == 0 => return Ok(Some(i)),
-            _ => {}
-        }
-        i += 1;
-    }
-    if in_string || depth_brace != 0 || depth_bracket != 0 {
-        return Err(format!("unterminated tool-call key/value: `{text}`"));
-    }
-    Ok(None)
+    super::balanced_lexer::find_top_level(
+        text,
+        ':',
+        &super::balanced_lexer::BalancedConfig::GEMMA4,
+    )
 }

@@ -11,6 +11,7 @@
 //!   `parameters` keys, decodes `arguments` from a JSON string when
 //!   the wire form is the OpenAI legacy shape.
 
+pub mod balanced_lexer;
 pub mod gemma4_pythonic;
 pub mod json;
 pub mod multi;
