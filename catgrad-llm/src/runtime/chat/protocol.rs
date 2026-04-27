@@ -65,6 +65,38 @@ impl std::fmt::Debug for ParserShape {
     }
 }
 
+/// Wire-encoded examples used by the shared protocol-test harness in
+/// `protocol_test_kit`. Each `&'static str` is a valid input for the
+/// corresponding scenario, encoded in the protocol's wire format. The
+/// harness asserts the resulting `DecodeEvent` shape; the protocol
+/// just declares its dialect.
+///
+/// `None` opts the protocol out of the universal harness. Used by
+/// the structural outliers (`llama3` bare-JSON streaming and
+/// `gpt_oss` harmony channels) — their wire shape doesn't match the
+/// "sentinel-bounded valid/unknown/invalid/malformed payload" model
+/// the universal scenarios assume.
+#[derive(Debug, Clone, Copy)]
+pub struct ProtocolExamples {
+    /// Wire-encoded call to `add` with `{a: 1, b: 2}`. Universal
+    /// directory in the harness binds an `add(a: number, b: number)`
+    /// tool, so this should resolve cleanly to a valid triple.
+    pub valid_call_add_1_2: &'static str,
+    /// Wire-encoded call to a tool name NOT in the harness's
+    /// directory. Should fatal-out with `UnknownTool`.
+    pub unknown_tool: &'static str,
+    /// Wire-encoded call to `add` with args that violate the schema
+    /// (e.g. `a` is a string). Should fatal-out with `InvalidArgs`.
+    pub invalid_args: &'static str,
+    /// Sentinel-opened block whose payload is malformed in the
+    /// protocol's dialect. Should fatal-out with `ParseError`.
+    pub malformed_payload: &'static str,
+    /// Just the open sentinel string — the harness uses this to
+    /// start a block then stuff an oversize body, asserting the
+    /// payload-too-large error.
+    pub open_sentinel_only: &'static str,
+}
+
 /// Capability descriptor for one model architecture's tool-calling
 /// dialect. Stored as a `&'static` to allow callers to compare protocol
 /// identity by pointer when useful.
@@ -91,6 +123,11 @@ pub struct ToolCallProtocol {
     /// expected wire format. Most dialects use
     /// [`render::identity_prepare_messages`].
     pub prepare_messages: fn(&[ToolSpec], Vec<types::Message>) -> Vec<types::Message>,
+
+    /// Wire-encoded examples for the universal protocol-test harness.
+    /// `None` opts the protocol out (used by the structural outliers
+    /// that don't fit the sentinel-bounded model).
+    pub examples: Option<ProtocolExamples>,
 }
 
 impl ToolCallProtocol {
@@ -137,6 +174,13 @@ const QWEN3: ToolCallProtocol = ToolCallProtocol {
     },
     supports_parallel_calls: true,
     prepare_messages: render::identity_prepare_messages,
+    examples: Some(ProtocolExamples {
+        valid_call_add_1_2: r##"<tool_call>{"name":"add","arguments":{"a":1,"b":2}}</tool_call>"##,
+        unknown_tool: r##"<tool_call>{"name":"missing","arguments":{}}</tool_call>"##,
+        invalid_args: r##"<tool_call>{"name":"add","arguments":{"a":"x","b":2}}</tool_call>"##,
+        malformed_payload: r##"<tool_call>not json</tool_call>"##,
+        open_sentinel_only: r##"<tool_call>"##,
+    }),
 };
 
 const SMOLLM2: ToolCallProtocol = ToolCallProtocol {
@@ -154,6 +198,13 @@ const SMOLLM2: ToolCallProtocol = ToolCallProtocol {
     // reliable parallel-call emitters; expose them as serial only.
     supports_parallel_calls: false,
     prepare_messages: protocols::smollm2::prepare_messages,
+    examples: Some(ProtocolExamples {
+        valid_call_add_1_2: r##"<tool_call>[{"name":"add","arguments":{"a":1,"b":2}}]</tool_call>"##,
+        unknown_tool: r##"<tool_call>[{"name":"missing","arguments":{}}]</tool_call>"##,
+        invalid_args: r##"<tool_call>[{"name":"add","arguments":{"a":"x","b":2}}]</tool_call>"##,
+        malformed_payload: r##"<tool_call>not json</tool_call>"##,
+        open_sentinel_only: r##"<tool_call>"##,
+    }),
 };
 
 const SMOLLM3: ToolCallProtocol = ToolCallProtocol {
@@ -169,6 +220,13 @@ const SMOLLM3: ToolCallProtocol = ToolCallProtocol {
     },
     supports_parallel_calls: true,
     prepare_messages: render::identity_prepare_messages,
+    examples: Some(ProtocolExamples {
+        valid_call_add_1_2: r##"<tool_call>{"name":"add","arguments":{"a":1,"b":2}}</tool_call>"##,
+        unknown_tool: r##"<tool_call>{"name":"missing","arguments":{}}</tool_call>"##,
+        invalid_args: r##"<tool_call>{"name":"add","arguments":{"a":"x","b":2}}</tool_call>"##,
+        malformed_payload: r##"<tool_call>not json</tool_call>"##,
+        open_sentinel_only: r##"<tool_call>"##,
+    }),
 };
 
 const LLAMA3: ToolCallProtocol = ToolCallProtocol {
@@ -178,6 +236,7 @@ const LLAMA3: ToolCallProtocol = ToolCallProtocol {
     // so the dialect is structurally single-call per turn.
     supports_parallel_calls: false,
     prepare_messages: render::identity_prepare_messages,
+    examples: None,
 };
 
 const LFM2: ToolCallProtocol = ToolCallProtocol {
@@ -203,6 +262,13 @@ const LFM2: ToolCallProtocol = ToolCallProtocol {
     // calls in one generation are part of the wire format.
     supports_parallel_calls: true,
     prepare_messages: render::identity_prepare_messages,
+    examples: Some(ProtocolExamples {
+        valid_call_add_1_2: r##"<|tool_call_start|>[add(a=1, b=2)]<|tool_call_end|>"##,
+        unknown_tool: r##"<|tool_call_start|>[missing()]<|tool_call_end|>"##,
+        invalid_args: r##"<|tool_call_start|>[add(a="x", b=2)]<|tool_call_end|>"##,
+        malformed_payload: r##"<|tool_call_start|>not anything{<|tool_call_end|>"##,
+        open_sentinel_only: r##"<|tool_call_start|>"##,
+    }),
 };
 
 const QWEN3_5: ToolCallProtocol = ToolCallProtocol {
@@ -216,6 +282,13 @@ const QWEN3_5: ToolCallProtocol = ToolCallProtocol {
     },
     supports_parallel_calls: true,
     prepare_messages: render::identity_prepare_messages,
+    examples: Some(ProtocolExamples {
+        valid_call_add_1_2: r##"<tool_call><function=add><parameter=a>1</parameter><parameter=b>2</parameter></function></tool_call>"##,
+        unknown_tool: r##"<tool_call><function=missing></function></tool_call>"##,
+        invalid_args: r##"<tool_call><function=add><parameter=a>"x"</parameter><parameter=b>2</parameter></function></tool_call>"##,
+        malformed_payload: r##"<tool_call>not xml</tool_call>"##,
+        open_sentinel_only: r##"<tool_call>"##,
+    }),
 };
 
 const OLMO3: ToolCallProtocol = ToolCallProtocol {
@@ -229,6 +302,13 @@ const OLMO3: ToolCallProtocol = ToolCallProtocol {
     },
     supports_parallel_calls: true,
     prepare_messages: render::identity_prepare_messages,
+    examples: Some(ProtocolExamples {
+        valid_call_add_1_2: r##"<function_calls>[add(a=1, b=2)]</function_calls>"##,
+        unknown_tool: r##"<function_calls>[missing()]</function_calls>"##,
+        invalid_args: r##"<function_calls>[add(a="x", b=2)]</function_calls>"##,
+        malformed_payload: r##"<function_calls>not pythonic{</function_calls>"##,
+        open_sentinel_only: r##"<function_calls>"##,
+    }),
 };
 
 const NEMOTRON: ToolCallProtocol = ToolCallProtocol {
@@ -242,6 +322,13 @@ const NEMOTRON: ToolCallProtocol = ToolCallProtocol {
     },
     supports_parallel_calls: true,
     prepare_messages: render::identity_prepare_messages,
+    examples: Some(ProtocolExamples {
+        valid_call_add_1_2: r##"<tool_call><function=add><parameter=a>1</parameter><parameter=b>2</parameter></function></tool_call>"##,
+        unknown_tool: r##"<tool_call><function=missing></function></tool_call>"##,
+        invalid_args: r##"<tool_call><function=add><parameter=a>"x"</parameter><parameter=b>2</parameter></function></tool_call>"##,
+        malformed_payload: r##"<tool_call>not xml</tool_call>"##,
+        open_sentinel_only: r##"<tool_call>"##,
+    }),
 };
 
 const GRANITE: ToolCallProtocol = ToolCallProtocol {
@@ -256,6 +343,13 @@ const GRANITE: ToolCallProtocol = ToolCallProtocol {
     },
     supports_parallel_calls: true,
     prepare_messages: render::identity_prepare_messages,
+    examples: Some(ProtocolExamples {
+        valid_call_add_1_2: r##"<|tool_call|>[{"name":"add","arguments":{"a":1,"b":2}}]"##,
+        unknown_tool: r##"<|tool_call|>[{"name":"missing","arguments":{}}]"##,
+        invalid_args: r##"<|tool_call|>[{"name":"add","arguments":{"a":"x","b":2}}]"##,
+        malformed_payload: r##"<|tool_call|>not json at all"##,
+        open_sentinel_only: r##"<|tool_call|>"##,
+    }),
 };
 
 const MISTRAL3: ToolCallProtocol = ToolCallProtocol {
@@ -270,6 +364,13 @@ const MISTRAL3: ToolCallProtocol = ToolCallProtocol {
     },
     supports_parallel_calls: true,
     prepare_messages: render::identity_prepare_messages,
+    examples: Some(ProtocolExamples {
+        valid_call_add_1_2: r##"[TOOL_CALLS][{"name":"add","arguments":{"a":1,"b":2}}]"##,
+        unknown_tool: r##"[TOOL_CALLS][{"name":"missing","arguments":{}}]"##,
+        invalid_args: r##"[TOOL_CALLS][{"name":"add","arguments":{"a":"x","b":2}}]"##,
+        malformed_payload: r##"[TOOL_CALLS]not json"##,
+        open_sentinel_only: r##"[TOOL_CALLS]"##,
+    }),
 };
 
 const PHI4: ToolCallProtocol = ToolCallProtocol {
@@ -282,6 +383,13 @@ const PHI4: ToolCallProtocol = ToolCallProtocol {
     },
     supports_parallel_calls: true,
     prepare_messages: render::identity_prepare_messages,
+    examples: Some(ProtocolExamples {
+        valid_call_add_1_2: r##"functools[{"name":"add","arguments":{"a":1,"b":2}}]"##,
+        unknown_tool: r##"functools[{"name":"missing","arguments":{}}]"##,
+        invalid_args: r##"functools[{"name":"add","arguments":{"a":"x","b":2}}]"##,
+        malformed_payload: r##"functoolsnot json"##,
+        open_sentinel_only: r##"functools"##,
+    }),
 };
 
 const GPT_OSS: ToolCallProtocol = ToolCallProtocol {
@@ -289,6 +397,7 @@ const GPT_OSS: ToolCallProtocol = ToolCallProtocol {
     parser: ParserShape::Custom(protocols::gpt_oss::make_parser),
     supports_parallel_calls: true,
     prepare_messages: render::identity_prepare_messages,
+    examples: None,
 };
 
 const GEMMA4: ToolCallProtocol = ToolCallProtocol {
@@ -305,6 +414,13 @@ const GEMMA4: ToolCallProtocol = ToolCallProtocol {
     },
     supports_parallel_calls: true,
     prepare_messages: render::identity_prepare_messages,
+    examples: Some(ProtocolExamples {
+        valid_call_add_1_2: r##"<|tool_call>call:add{a:1,b:2}<tool_call|>"##,
+        unknown_tool: r##"<|tool_call>call:missing{}<tool_call|>"##,
+        invalid_args: r##"<|tool_call>call:add{a:<|"|>x<|"|>,b:2}<tool_call|>"##,
+        malformed_payload: r##"<|tool_call>this isn't valid<tool_call|>"##,
+        open_sentinel_only: r##"<|tool_call>"##,
+    }),
 };
 
 /// Lookup table from `(arch, tokenizer_config)` to the architecture's

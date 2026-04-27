@@ -56,41 +56,14 @@ fn make_parser(directory: Arc<ToolDirectory>) -> Box<dyn IncrementalToolCallPars
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::chat::protocol_test_kit::{
+        add_tool, directory_with_add, last_stop_reason, run,
+    };
     use crate::runtime::chat::{
         DecodeEvent, IncrementalToolCallParser, StopReason, ToolDirectory, ToolSpec,
     };
     use serde_json::json;
 
-    /// Universal sentinel-engine scenarios via the shared harness.
-    #[test]
-    fn passes_universal_scenarios() {
-        use crate::runtime::chat::protocol_test_kit::{ProtocolTestFixture, directory_with_add};
-        ProtocolTestFixture {
-            make_parser: Box::new(make_parser),
-            directory: directory_with_add(),
-            valid_call_add_1_2: r##"<tool_call>{"name":"add","arguments":{"a":1,"b":2}}</tool_call>"##,
-            unknown_tool_call: r##"<tool_call>{"name":"missing","arguments":{}}</tool_call>"##,
-            invalid_args_call: r##"<tool_call>{"name":"add","arguments":{"a":"x","b":2}}</tool_call>"##,
-            malformed_payload: r##"<tool_call>not json</tool_call>"##,
-            open_sentinel_only: Some(r##"<tool_call>"##),
-        }
-        .run_universal_scenarios();
-    }
-
-    fn add_tool() -> ToolSpec {
-        ToolSpec::new(
-            "add",
-            None,
-            json!({
-                "type": "object",
-                "properties": {
-                    "a": { "type": "number" },
-                    "b": { "type": "number" },
-                },
-                "required": ["a", "b"],
-            }),
-        )
-    }
 
     #[test]
     fn parser_uses_same_wire_format_as_qwen3() {

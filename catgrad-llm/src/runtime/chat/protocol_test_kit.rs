@@ -1,26 +1,20 @@
-//! Universal scenario harness for sentinel-engine protocols.
+//! Universal protocol-test harness, registry-driven.
 //!
-//! Per-protocol tests historically duplicated ~10 universal scenarios
-//! (plain-text passthrough, valid-call triple emission, unknown-tool /
-//! invalid-args / malformed-payload terminal errors, after-fatal
-//! poisoning, chunk-split invariance, UTF-8 safety, payload-size cap).
-//! This module factors those into one [`ProtocolTestFixture`] +
-//! [`ProtocolTestFixture::run_universal_scenarios`] pair.
+//! The data each protocol contributes (wire-encoded examples for
+//! valid / unknown-tool / invalid-args / malformed-payload / open
+//! sentinel) lives on [`ToolCallProtocol::examples`] in
+//! [`super::protocol`] — not in per-protocol test modules. This
+//! module hosts ONE crate-level test fn, [`run_all_engine_scenarios`],
+//! that iterates the registry and exercises the universal scenarios
+//! against every protocol whose `examples` is `Some(_)`.
 //!
-//! Per-protocol responsibilities shrink to **one fixture** + **one
-//! test fn** that calls the harness:
+//! Each scenario is its own free function so a failing assertion
+//! still names the scenario and protocol arch in the panic message;
+//! the iteration itself is just glue.
 //!
-//! ```ignore
-//! #[test]
-//! fn granite_passes_universal_scenarios() {
-//!     fixture().run_universal_scenarios();
-//! }
-//! ```
-//!
-//! Wire-format-specific tests stay in the per-protocol module —
-//! anything that tests the dialect's quirks (parameters-key alias,
-//! bare-object form, asymmetric-sentinel oddities) doesn't belong
-//! here.
+//! Wire-format-specific tests (parameters-key alias, bare-object
+//! form, etc.) stay in the per-protocol module — they exercise
+//! dialect quirks the universal scenarios don't model.
 
 #![cfg(test)]
 
@@ -30,212 +24,306 @@ use serde_json::Value as JsonValue;
 
 use super::event::{DecodeEvent, ParserError, StopReason};
 use super::parser::IncrementalToolCallParser;
+use super::protocol::{ProtocolExamples, ToolCallProtocol, tool_protocol_for};
 use super::sentinel_engine::MAX_TOOL_CALL_PAYLOAD_BYTES;
 use super::tool_spec::ToolDirectory;
 
-/// Constructor: `fn(directory) -> Box<dyn IncrementalToolCallParser>`.
-/// Each protocol module supplies a closure that goes through the
-/// registry, so the harness exercises the same parser path the
-/// gateway uses.
-pub type ParserFactory = Box<dyn Fn(Arc<ToolDirectory>) -> Box<dyn IncrementalToolCallParser>>;
-
-/// Per-protocol inputs for the universal scenarios.
-///
-/// Each `&'static str` is the wire-format-encoded input for one
-/// scenario. The harness asserts the resulting `DecodeEvent` shape;
-/// the protocol tells the harness how to encode each scenario for
-/// its dialect.
-pub struct ProtocolTestFixture {
-    /// Constructs a fresh parser bound to `directory`.
-    pub make_parser: ParserFactory,
-    /// Tool directory the fixture inputs are encoded against.
-    /// Conventionally must contain a tool named `add` with required
-    /// number args `a` and `b` (matched by `valid_single_call`).
-    pub directory: Arc<ToolDirectory>,
-    /// Wire-encoded valid call to `add` with `{a:1, b:2}`.
-    pub valid_call_add_1_2: &'static str,
-    /// Wire-encoded call to a tool name NOT in `directory`.
-    pub unknown_tool_call: &'static str,
-    /// Wire-encoded call to `add` with args that violate the schema
-    /// (e.g. `a` is a string instead of a number).
-    pub invalid_args_call: &'static str,
-    /// Sentinel-opened payload that is malformed (e.g. invalid JSON
-    /// between sentinels, unparseable Pythonic, etc.).
-    pub malformed_payload: &'static str,
-    /// Just the open sentinel string — used by the
-    /// payload-too-large test to start a block then stuff an
-    /// oversize body. Set to `None` for protocols that don't have
-    /// a meaningful "inside-block byte buffer" (none today; all
-    /// engine-based protocols do).
-    pub open_sentinel_only: Option<&'static str>,
+/// Architecture string + tokenizer-config pair used for the registry
+/// lookup. The harness binds an `add(a: number, b: number)` tool, so
+/// each protocol's `examples.valid_call_add_1_2` should resolve to a
+/// valid triple.
+struct ArchSpec {
+    arch: &'static str,
+    bos_token: Option<&'static str>,
 }
 
-impl ProtocolTestFixture {
-    /// Run every universal scenario in turn. Failure panics with
-    /// scenario name + protocol context so the failing case is
-    /// obvious in test output.
-    pub fn run_universal_scenarios(&self) {
-        self.assert_plain_text_passes_through();
-        self.assert_valid_call_emits_triple();
-        self.assert_unknown_tool_terminates();
-        self.assert_invalid_args_terminates();
-        self.assert_malformed_payload_terminates();
-        self.assert_after_fatal_returns_empty();
-        self.assert_utf8_text_does_not_panic();
-        self.assert_chunk_split_invariance_on_valid_call();
-        if self.open_sentinel_only.is_some() {
-            self.assert_payload_over_limit_is_fatal();
+impl ArchSpec {
+    fn cfg(&self) -> JsonValue {
+        match self.bos_token {
+            Some(tok) => serde_json::json!({ "bos_token": tok }),
+            None => JsonValue::Null,
         }
     }
+}
 
-    fn parser(&self) -> Box<dyn IncrementalToolCallParser> {
-        (self.make_parser)(Arc::clone(&self.directory))
+/// Every architecture string the universal harness should iterate.
+/// Order is stable (alphabetical within shape group) so test failures
+/// reference the same row across runs.
+const ARCHES: &[ArchSpec] = &[
+    ArchSpec { arch: "GraniteForCausalLM",      bos_token: None },
+    ArchSpec { arch: "Lfm2ForCausalLM",         bos_token: None },
+    ArchSpec { arch: "MistralForCausalLM",      bos_token: None },
+    ArchSpec { arch: "NemotronForCausalLM",     bos_token: None },
+    ArchSpec { arch: "Olmo3ForCausalLM",        bos_token: None },
+    ArchSpec { arch: "Phi4ForCausalLM",         bos_token: None },
+    ArchSpec { arch: "Qwen3ForCausalLM",        bos_token: None },
+    ArchSpec { arch: "Qwen3_5ForCausalLM",      bos_token: None },
+    ArchSpec { arch: "SmolLM3ForCausalLM",      bos_token: None },
+    ArchSpec { arch: "Gemma4ForConditionalGeneration", bos_token: None },
+    // Tokenizer-fingerprinted: SmolLM2 reports `LlamaForCausalLM` and
+    // is disambiguated by `<|im_start|>` BOS.
+    ArchSpec { arch: "LlamaForCausalLM",        bos_token: Some("<|im_start|>") },
+];
+
+/// Crate-wide universal-scenario test. Iterates every architecture in
+/// [`ARCHES`], skips any whose protocol opts out (`examples = None`),
+/// and runs the full universal scenario suite against the rest. ONE
+/// test fn replaces what used to be a per-protocol `passes_universal_scenarios`
+/// in every engine-protocol module.
+#[test]
+fn run_all_engine_scenarios() {
+    let mut ran = 0;
+    for spec in ARCHES {
+        let cfg = spec.cfg();
+        let proto = tool_protocol_for(spec.arch, &cfg)
+            .unwrap_or_else(|| panic!("registry lookup for arch {} returned None", spec.arch));
+        let Some(examples) = proto.examples.as_ref() else {
+            // Outliers (gpt_oss, llama3) opt out of the harness.
+            continue;
+        };
+        run_scenarios_for(spec.arch, proto, examples);
+        ran += 1;
     }
+    assert!(
+        ran >= 11,
+        "expected ≥11 engine protocols to run the harness, ran {ran}"
+    );
+}
 
-    fn drive(
-        &self,
-        chunks: &[&str],
-    ) -> Vec<DecodeEvent> {
-        let mut p = self.parser();
-        let mut events = Vec::new();
-        for c in chunks {
-            events.extend(p.feed(c));
-        }
-        events.extend(p.finish(StopReason::EndOfText));
+fn run_scenarios_for(
+    arch: &str,
+    proto: &'static ToolCallProtocol,
+    ex: &ProtocolExamples,
+) {
+    let dir = directory_with_add();
+    let make = |dir: Arc<ToolDirectory>| proto.make_parser(dir);
+
+    assert_plain_text_passes_through(arch, &dir, &make);
+    assert_valid_call_emits_triple(arch, &dir, &make, ex.valid_call_add_1_2);
+    assert_unknown_tool_terminates(arch, &dir, &make, ex.unknown_tool);
+    assert_invalid_args_terminates(arch, &dir, &make, ex.invalid_args);
+    assert_malformed_payload_terminates(arch, &dir, &make, ex.malformed_payload);
+    assert_after_fatal_returns_empty(arch, &dir, &make, ex.malformed_payload);
+    assert_utf8_text_does_not_panic(arch, &dir, &make);
+    assert_chunk_split_invariance(arch, &dir, &make, ex.valid_call_add_1_2);
+    assert_payload_over_limit_is_fatal(arch, &dir, &make, ex.open_sentinel_only);
+}
+
+// --- scenario helpers -----------------------------------------------
+
+fn drive(
+    dir: &Arc<ToolDirectory>,
+    make: &impl Fn(Arc<ToolDirectory>) -> Box<dyn IncrementalToolCallParser>,
+    chunks: &[&str],
+) -> Vec<DecodeEvent> {
+    let mut p = make(Arc::clone(dir));
+    let mut events = Vec::new();
+    for c in chunks {
+        events.extend(p.feed(c));
+    }
+    events.extend(p.finish(StopReason::EndOfText));
+    events
+}
+
+fn assert_plain_text_passes_through(
+    arch: &str,
+    dir: &Arc<ToolDirectory>,
+    make: &impl Fn(Arc<ToolDirectory>) -> Box<dyn IncrementalToolCallParser>,
+) {
+    let events = drive(dir, make, &["hello world"]);
+    let texts: String = events
+        .iter()
+        .filter_map(|e| match e {
+            DecodeEvent::TextDelta(s) => Some(s.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(texts, "hello world", "[{arch}] plain-text passthrough");
+    assert_eq!(
+        last_stop_reason(&events),
+        StopReason::EndOfText,
+        "[{arch}] plain-text stop reason"
+    );
+}
+
+fn assert_valid_call_emits_triple(
+    arch: &str,
+    dir: &Arc<ToolDirectory>,
+    make: &impl Fn(Arc<ToolDirectory>) -> Box<dyn IncrementalToolCallParser>,
+    input: &str,
+) {
+    let events = drive(dir, make, &[input]);
+    let starts: Vec<&DecodeEvent> = events
+        .iter()
+        .filter(|e| matches!(e, DecodeEvent::ToolCallStart { .. }))
+        .collect();
+    assert_eq!(
+        starts.len(),
+        1,
+        "[{arch}] expected exactly one ToolCallStart, got events {events:#?}"
+    );
+    let DecodeEvent::ToolCallStart { name, .. } = starts[0] else {
+        unreachable!()
+    };
+    assert_eq!(name, "add", "[{arch}] valid call name");
+    let end_args: Vec<&JsonValue> = events
+        .iter()
+        .filter_map(|e| match e {
+            DecodeEvent::ToolCallEnd { args, .. } => Some(args),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(end_args.len(), 1, "[{arch}] expected one ToolCallEnd");
+    assert_eq!(end_args[0]["a"], JsonValue::from(1), "[{arch}] arg a=1");
+    assert_eq!(end_args[0]["b"], JsonValue::from(2), "[{arch}] arg b=2");
+    assert_eq!(last_stop_reason(&events), StopReason::EndOfText);
+}
+
+fn assert_unknown_tool_terminates(
+    arch: &str,
+    dir: &Arc<ToolDirectory>,
+    make: &impl Fn(Arc<ToolDirectory>) -> Box<dyn IncrementalToolCallParser>,
+    input: &str,
+) {
+    let events = drive(dir, make, &[input]);
+    assert!(
         events
-    }
-
-    fn assert_plain_text_passes_through(&self) {
-        let events = self.drive(&["hello world"]);
-        let texts: String = events
             .iter()
-            .filter_map(|e| match e {
-                DecodeEvent::TextDelta(s) => Some(s.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(texts, "hello world", "plain-text scenario");
-        assert_eq!(last_stop_reason(&events), StopReason::EndOfText);
-    }
+            .any(|e| matches!(e, DecodeEvent::UnknownTool { .. })),
+        "[{arch}] unknown_tool must emit UnknownTool: got {events:#?}"
+    );
+    assert_eq!(last_stop_reason(&events), StopReason::ProtocolError);
+}
 
-    fn assert_valid_call_emits_triple(&self) {
-        let events = self.drive(&[self.valid_call_add_1_2]);
-        let starts: Vec<&DecodeEvent> = events
+fn assert_invalid_args_terminates(
+    arch: &str,
+    dir: &Arc<ToolDirectory>,
+    make: &impl Fn(Arc<ToolDirectory>) -> Box<dyn IncrementalToolCallParser>,
+    input: &str,
+) {
+    let events = drive(dir, make, &[input]);
+    assert!(
+        events
             .iter()
-            .filter(|e| matches!(e, DecodeEvent::ToolCallStart { .. }))
-            .collect();
-        assert_eq!(starts.len(), 1, "exactly one ToolCallStart for valid call");
-        let DecodeEvent::ToolCallStart { name, .. } = starts[0] else {
-            unreachable!()
-        };
-        assert_eq!(name, "add");
-        let ends: Vec<&JsonValue> = events
+            .any(|e| matches!(e, DecodeEvent::InvalidArgs { .. })),
+        "[{arch}] invalid_args must emit InvalidArgs: got {events:#?}"
+    );
+    assert_eq!(last_stop_reason(&events), StopReason::ProtocolError);
+}
+
+fn assert_malformed_payload_terminates(
+    arch: &str,
+    dir: &Arc<ToolDirectory>,
+    make: &impl Fn(Arc<ToolDirectory>) -> Box<dyn IncrementalToolCallParser>,
+    input: &str,
+) {
+    let events = drive(dir, make, &[input]);
+    assert!(
+        events
             .iter()
-            .filter_map(|e| match e {
-                DecodeEvent::ToolCallEnd { args, .. } => Some(args),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(ends.len(), 1);
-        assert_eq!(ends[0]["a"], JsonValue::from(1));
-        assert_eq!(ends[0]["b"], JsonValue::from(2));
-        assert_eq!(last_stop_reason(&events), StopReason::EndOfText);
-    }
+            .any(|e| matches!(e, DecodeEvent::ParseError { .. })),
+        "[{arch}] malformed must emit ParseError: got {events:#?}"
+    );
+    assert_eq!(last_stop_reason(&events), StopReason::ProtocolError);
+}
 
-    fn assert_unknown_tool_terminates(&self) {
-        let events = self.drive(&[self.unknown_tool_call]);
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, DecodeEvent::UnknownTool { .. })),
-            "unknown_tool_call must emit UnknownTool: got {events:#?}"
-        );
-        assert_eq!(last_stop_reason(&events), StopReason::ProtocolError);
-    }
+fn assert_after_fatal_returns_empty(
+    arch: &str,
+    dir: &Arc<ToolDirectory>,
+    make: &impl Fn(Arc<ToolDirectory>) -> Box<dyn IncrementalToolCallParser>,
+    malformed: &str,
+) {
+    let mut p = make(Arc::clone(dir));
+    let _ = p.feed(malformed);
+    let _ = p.finish(StopReason::EndOfText);
+    // After the fatal: every subsequent feed/finish returns empty.
+    assert!(
+        p.feed("anything else").is_empty(),
+        "[{arch}] post-fatal feed must return empty"
+    );
+    assert!(
+        p.finish(StopReason::EndOfText).is_empty(),
+        "[{arch}] post-fatal finish must return empty"
+    );
+}
 
-    fn assert_invalid_args_terminates(&self) {
-        let events = self.drive(&[self.invalid_args_call]);
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, DecodeEvent::InvalidArgs { .. })),
-            "invalid_args_call must emit InvalidArgs: got {events:#?}"
-        );
-        assert_eq!(last_stop_reason(&events), StopReason::ProtocolError);
-    }
+fn assert_utf8_text_does_not_panic(
+    _arch: &str,
+    dir: &Arc<ToolDirectory>,
+    make: &impl Fn(Arc<ToolDirectory>) -> Box<dyn IncrementalToolCallParser>,
+) {
+    // No panic = pass.
+    let _ = drive(dir, make, &["héllo wörld 你好 "]);
+}
 
-    fn assert_malformed_payload_terminates(&self) {
-        let events = self.drive(&[self.malformed_payload]);
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, DecodeEvent::ParseError { .. })),
-            "malformed_payload must emit ParseError: got {events:#?}"
-        );
-        assert_eq!(last_stop_reason(&events), StopReason::ProtocolError);
-    }
-
-    fn assert_after_fatal_returns_empty(&self) {
-        let mut p = self.parser();
-        // Drive the parser to a terminal fatal. Pair protocols emit
-        // it inside `feed` (when the close sentinel arrives or never);
-        // Prefix protocols emit it inside `finish` (payload drains
-        // there). Either way, the fatal lands by the time the
-        // following finish() returns.
-        let _ = p.feed(self.malformed_payload);
-        let _ = p.finish(StopReason::EndOfText);
-        // After the fatal: every subsequent feed/finish returns empty.
-        assert!(
-            p.feed("anything else").is_empty(),
-            "post-fatal feed must return empty"
-        );
-        assert!(
-            p.finish(StopReason::EndOfText).is_empty(),
-            "post-fatal finish must return empty"
+/// Split the valid-call input at every char boundary; same input
+/// chunked any way must produce the same events.
+fn assert_chunk_split_invariance(
+    arch: &str,
+    dir: &Arc<ToolDirectory>,
+    make: &impl Fn(Arc<ToolDirectory>) -> Box<dyn IncrementalToolCallParser>,
+    text: &str,
+) {
+    let whole = format!("{:?}", drive(dir, make, &[text]));
+    let len = text.len();
+    for split in (1..len).filter(|i| text.is_char_boundary(*i)) {
+        let chunked = format!("{:?}", drive(dir, make, &[&text[..split], &text[split..]]));
+        assert_eq!(
+            chunked, whole,
+            "[{arch}] chunk-split at byte {split} must yield same events"
         );
     }
+}
 
-    fn assert_utf8_text_does_not_panic(&self) {
-        let _events = self.drive(&["héllo wörld 你好 "]);
-        // No panic = pass.
-    }
+fn assert_payload_over_limit_is_fatal(
+    arch: &str,
+    dir: &Arc<ToolDirectory>,
+    make: &impl Fn(Arc<ToolDirectory>) -> Box<dyn IncrementalToolCallParser>,
+    open: &str,
+) {
+    let mut p = make(Arc::clone(dir));
+    let _ = p.feed(open);
+    let huge = "x".repeat(MAX_TOOL_CALL_PAYLOAD_BYTES + 1);
+    let events = p.feed(&huge);
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            DecodeEvent::ParseError {
+                source: ParserError::PayloadTooLarge { .. },
+                ..
+            }
+        )),
+        "[{arch}] oversize payload must emit PayloadTooLarge: got {events:#?}"
+    );
+    assert_eq!(last_stop_reason(&events), StopReason::ProtocolError);
+}
 
-    /// Chunk-invariance lite: split the valid-call input at every
-    /// possible char boundary, run through the parser, and confirm
-    /// the events are the same as feeding it whole.
-    fn assert_chunk_split_invariance_on_valid_call(&self) {
-        let whole = format!("{:?}", self.drive(&[self.valid_call_add_1_2]));
-        let text = self.valid_call_add_1_2;
-        let len = text.len();
-        for split in (1..len).filter(|i| text.is_char_boundary(*i)) {
-            let chunked = format!("{:?}", self.drive(&[&text[..split], &text[split..]]));
-            assert_eq!(
-                chunked, whole,
-                "chunk-split at byte {split} must yield same events"
-            );
-        }
-    }
+/// Look up a protocol by arch + optional BOS token (for tokenizer-
+/// fingerprinted dispatch). Panics if the arch isn't registered —
+/// tests should reference an arch they know exists.
+pub fn protocol_for(arch: &'static str, bos_token: Option<&'static str>) -> &'static ToolCallProtocol {
+    let cfg = match bos_token {
+        Some(tok) => serde_json::json!({ "bos_token": tok }),
+        None => JsonValue::Null,
+    };
+    tool_protocol_for(arch, &cfg)
+        .unwrap_or_else(|| panic!("registry lookup for arch `{arch}` returned None"))
+}
 
-    fn assert_payload_over_limit_is_fatal(&self) {
-        let Some(open) = self.open_sentinel_only else {
-            return;
-        };
-        let mut p = self.parser();
-        let _ = p.feed(open);
-        let huge = "x".repeat(MAX_TOOL_CALL_PAYLOAD_BYTES + 1);
-        let events = p.feed(&huge);
-        assert!(
-            events.iter().any(|e| matches!(
-                e,
-                DecodeEvent::ParseError {
-                    source: ParserError::PayloadTooLarge { .. },
-                    ..
-                }
-            )),
-            "oversize payload must emit PayloadTooLarge: got {events:#?}"
-        );
-        assert_eq!(last_stop_reason(&events), StopReason::ProtocolError);
-    }
+/// One-line parser construction for per-protocol tests:
+///
+/// ```ignore
+/// let mut p = test_kit::make_parser_for("Qwen3ForCausalLM", None, directory);
+/// ```
+///
+/// Replaces the ~6-line per-protocol `make_parser` shim that every
+/// engine-protocol module used to ship.
+pub fn make_parser_for(
+    arch: &'static str,
+    bos_token: Option<&'static str>,
+    directory: Arc<ToolDirectory>,
+) -> Box<dyn IncrementalToolCallParser> {
+    protocol_for(arch, bos_token).make_parser(directory)
 }
 
 pub fn last_stop_reason(events: &[DecodeEvent]) -> StopReason {

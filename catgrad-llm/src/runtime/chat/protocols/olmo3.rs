@@ -72,25 +72,12 @@ impl IncrementalToolCallParser for Olmo3Parser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::chat::protocol_test_kit::{
+        add_tool, directory_with_add, last_stop_reason, run,
+    };
     use crate::runtime::chat::ToolSpec;
     use serde_json::json;
 
-    /// Universal sentinel-engine scenarios via the shared harness.
-    /// Wire-format-specific cases live in the per-test sections below.
-    #[test]
-    fn passes_universal_scenarios() {
-        use crate::runtime::chat::protocol_test_kit::{ProtocolTestFixture, directory_with_add};
-        ProtocolTestFixture {
-            make_parser: Box::new(make_parser),
-            directory: directory_with_add(),
-            valid_call_add_1_2: r##"<function_calls>[add(a=1, b=2)]</function_calls>"##,
-            unknown_tool_call: r##"<function_calls>[missing()]</function_calls>"##,
-            invalid_args_call: r##"<function_calls>[add(a="x", b=2)]</function_calls>"##,
-            malformed_payload: r##"<function_calls>not pythonic{</function_calls>"##,
-            open_sentinel_only: Some(r##"<function_calls>"##),
-        }
-        .run_universal_scenarios();
-    }
 
     fn calculator_tool() -> ToolSpec {
         ToolSpec::new(
@@ -109,48 +96,8 @@ mod tests {
         )
     }
 
-    fn add_tool() -> ToolSpec {
-        ToolSpec::new(
-            "add",
-            Some("add two numbers".into()),
-            json!({
-                "type": "object",
-                "properties": {
-                    "a": { "type": "number" },
-                    "b": { "type": "number" },
-                },
-                "required": ["a", "b"],
-                "additionalProperties": false,
-            }),
-        )
-    }
-
     fn directory_with_calculator() -> Arc<ToolDirectory> {
         Arc::new(ToolDirectory::new(vec![calculator_tool()]).unwrap())
-    }
-
-    fn directory_with_add() -> Arc<ToolDirectory> {
-        Arc::new(ToolDirectory::new(vec![add_tool()]).unwrap())
-    }
-
-    fn run(parser: &mut dyn IncrementalToolCallParser, chunks: &[&str]) -> Vec<DecodeEvent> {
-        let mut events = Vec::new();
-        for chunk in chunks {
-            events.extend(parser.feed(chunk));
-        }
-        events.extend(parser.finish(StopReason::EndOfText));
-        events
-    }
-
-    fn last_stop_reason(events: &[DecodeEvent]) -> StopReason {
-        events
-            .iter()
-            .rev()
-            .find_map(|e| match e {
-                DecodeEvent::Stop { reason } => Some(*reason),
-                _ => None,
-            })
-            .expect("expected a Stop event")
     }
 
 

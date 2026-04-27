@@ -93,24 +93,11 @@ impl IncrementalToolCallParser for GraniteParser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::chat::protocol_test_kit::{
+        add_tool, directory_with_add, last_stop_reason, run,
+    };
     use crate::runtime::chat::ToolSpec;
     use serde_json::json;
-
-    fn add_tool() -> ToolSpec {
-        ToolSpec::new(
-            "add",
-            Some("add two numbers".into()),
-            json!({
-                "type": "object",
-                "properties": {
-                    "a": { "type": "number" },
-                    "b": { "type": "number" },
-                },
-                "required": ["a", "b"],
-                "additionalProperties": false,
-            }),
-        )
-    }
 
     fn mul_tool() -> ToolSpec {
         ToolSpec::new(
@@ -127,51 +114,10 @@ mod tests {
         )
     }
 
-    fn directory_with_add() -> Arc<ToolDirectory> {
-        Arc::new(ToolDirectory::new(vec![add_tool()]).unwrap())
-    }
-
     fn directory_with_add_and_mul() -> Arc<ToolDirectory> {
         Arc::new(ToolDirectory::new(vec![add_tool(), mul_tool()]).unwrap())
     }
 
-    fn run(parser: &mut dyn IncrementalToolCallParser, chunks: &[&str]) -> Vec<DecodeEvent> {
-        let mut events = Vec::new();
-        for chunk in chunks {
-            events.extend(parser.feed(chunk));
-        }
-        events.extend(parser.finish(StopReason::EndOfText));
-        events
-    }
-
-    fn last_stop_reason(events: &[DecodeEvent]) -> StopReason {
-        events
-            .iter()
-            .rev()
-            .find_map(|e| match e {
-                DecodeEvent::Stop { reason } => Some(*reason),
-                _ => None,
-            })
-            .expect("expected a Stop event")
-    }
-
-    /// All universal sentinel-engine behaviours go through the
-    /// shared harness — this single test replaces what used to be
-    /// 8+ separate per-protocol scenarios.
-    #[test]
-    fn passes_universal_scenarios() {
-        use crate::runtime::chat::protocol_test_kit::ProtocolTestFixture;
-        ProtocolTestFixture {
-            make_parser: Box::new(make_parser),
-            directory: directory_with_add(),
-            valid_call_add_1_2: r#"<|tool_call|>[{"name":"add","arguments":{"a":1,"b":2}}]"#,
-            unknown_tool_call: r#"<|tool_call|>[{"name":"missing","arguments":{}}]"#,
-            invalid_args_call: r#"<|tool_call|>[{"name":"add","arguments":{"a":"x","b":2}}]"#,
-            malformed_payload: "<|tool_call|>not json at all",
-            open_sentinel_only: Some("<|tool_call|>"),
-        }
-        .run_universal_scenarios();
-    }
 
 
     #[test]
