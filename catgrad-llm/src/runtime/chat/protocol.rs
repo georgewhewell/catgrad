@@ -57,6 +57,48 @@ const LFM2: ToolCallProtocol = ToolCallProtocol {
     supports_parallel_calls: true,
 };
 
+const QWEN3_5: ToolCallProtocol = ToolCallProtocol {
+    render_tools: protocols::qwen3_5::render_tools,
+    make_parser: protocols::qwen3_5::make_parser,
+    supports_parallel_calls: true,
+};
+
+const OLMO3: ToolCallProtocol = ToolCallProtocol {
+    render_tools: protocols::olmo3::render_tools,
+    make_parser: protocols::olmo3::make_parser,
+    supports_parallel_calls: true,
+};
+
+const NEMOTRON: ToolCallProtocol = ToolCallProtocol {
+    render_tools: protocols::nemotron::render_tools,
+    make_parser: protocols::nemotron::make_parser,
+    supports_parallel_calls: true,
+};
+
+const GRANITE: ToolCallProtocol = ToolCallProtocol {
+    render_tools: protocols::granite::render_tools,
+    make_parser: protocols::granite::make_parser,
+    supports_parallel_calls: true,
+};
+
+const MISTRAL3: ToolCallProtocol = ToolCallProtocol {
+    render_tools: protocols::mistral3::render_tools,
+    make_parser: protocols::mistral3::make_parser,
+    supports_parallel_calls: true,
+};
+
+const PHI4: ToolCallProtocol = ToolCallProtocol {
+    render_tools: protocols::phi4::render_tools,
+    make_parser: protocols::phi4::make_parser,
+    supports_parallel_calls: true,
+};
+
+const GPT_OSS: ToolCallProtocol = ToolCallProtocol {
+    render_tools: protocols::gpt_oss::render_tools,
+    make_parser: protocols::gpt_oss::make_parser,
+    supports_parallel_calls: true,
+};
+
 /// Lookup table from HF `architectures[0]` string to the architecture's
 /// tool-call protocol. Returns `None` for architectures that do not
 /// support tool calling (or that have not yet been ported to the
@@ -64,9 +106,29 @@ const LFM2: ToolCallProtocol = ToolCallProtocol {
 pub fn tool_protocol_for(arch: &str) -> Option<&'static ToolCallProtocol> {
     match arch {
         "Qwen3ForCausalLM" | "Qwen3MoeForCausalLM" => Some(&QWEN3),
+        // Qwen3.5 family — text and conditional-generation variants
+        // share the same XML-in-`<tool_call>` dialect.
+        "Qwen3_5ForCausalLM"
+        | "Qwen3_5MoeForCausalLM"
+        | "Qwen3_5ForConditionalGeneration"
+        | "Qwen3_5MoeForConditionalGeneration" => Some(&QWEN3_5),
         // LFM2 (text-only) and LFM2-VL share the same tool-call wire
         // format; both use the same protocol.
         "Lfm2ForCausalLM" | "Lfm2VlForConditionalGeneration" => Some(&LFM2),
+        // OLMo 3 — Pythonic in `<function_calls>...</function_calls>`.
+        "Olmo3ForCausalLM" => Some(&OLMO3),
+        // Nemotron / Nemotron-H — Hermes-style JSON in `<tool_call>`.
+        "NemotronForCausalLM" | "NemotronHForCausalLM" => Some(&NEMOTRON),
+        // IBM Granite 3.x — JSON list after `<|tool_call|>`.
+        "GraniteForCausalLM" | "GraniteMoeForCausalLM" => Some(&GRANITE),
+        // Mistral / Ministral with `[TOOL_CALLS]` prefix sentinel.
+        "MistralForCausalLM" | "Mistral3ForCausalLM" | "Ministral3ForCausalLM" => {
+            Some(&MISTRAL3)
+        }
+        // Phi-3 / Phi-4-mini — `functools[...]` prefix sentinel.
+        "Phi3ForCausalLM" | "Phi4ForCausalLM" => Some(&PHI4),
+        // gpt-oss harmony channels.
+        "GptOssForCausalLM" => Some(&GPT_OSS),
         _ => None,
     }
 }
@@ -88,10 +150,21 @@ mod tests {
     }
 
     #[test]
+    fn extended_architectures_resolve_to_protocol() {
+        assert!(tool_protocol_for("Qwen3_5ForConditionalGeneration").is_some());
+        assert!(tool_protocol_for("Olmo3ForCausalLM").is_some());
+        assert!(tool_protocol_for("NemotronHForCausalLM").is_some());
+        assert!(tool_protocol_for("GraniteForCausalLM").is_some());
+        assert!(tool_protocol_for("MistralForCausalLM").is_some());
+        assert!(tool_protocol_for("Phi3ForCausalLM").is_some());
+        assert!(tool_protocol_for("GptOssForCausalLM").is_some());
+    }
+
+    #[test]
     fn unknown_architecture_returns_none() {
-        assert!(tool_protocol_for("Qwen3_5ForConditionalGeneration").is_none());
-        assert!(tool_protocol_for("Olmo3ForCausalLM").is_none());
         assert!(tool_protocol_for("LlamaForCausalLM").is_none());
+        assert!(tool_protocol_for("Gemma3ForCausalLM").is_none());
+        assert!(tool_protocol_for("DeepseekV3ForCausalLM").is_none());
         assert!(tool_protocol_for("").is_none());
     }
 }
