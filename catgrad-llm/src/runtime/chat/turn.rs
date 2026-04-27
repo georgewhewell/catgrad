@@ -97,7 +97,7 @@ impl ChatTurn {
     ) -> std::result::Result<Self, ChatTurnConfigError> {
         let arch = arch.into();
         let tools = tools.filter(|dir| !dir.is_empty());
-        let protocol = match (&tools, tool_protocol_for(&arch)) {
+        let protocol = match (&tools, tool_protocol_for(&arch, &tokenizer_config)) {
             (None, _) => None,
             (Some(_), Some(p)) => Some(p),
             (Some(_), None) => {
@@ -143,20 +143,21 @@ impl ChatTurn {
         // `tools` here is None unless ChatTurn was constructed with a
         // non-empty ToolDirectory AND the architecture has a registered
         // protocol. Both conditions are enforced by `Self::new`.
-        let shaped_tools = if let Some(tools) = &self.tools {
-            let render_fn = self
+        let (shaped_tools, prepared_messages) = if let Some(tools) = &self.tools {
+            let protocol = self
                 .protocol
-                .expect("invariant: tools=Some implies protocol=Some")
-                .render_tools;
-            Some(render_fn(tools.specs()))
+                .expect("invariant: tools=Some implies protocol=Some");
+            let shaped = (protocol.render_tools)(tools.specs());
+            let prepped = (protocol.prepare_messages)(tools.specs(), messages.to_vec());
+            (Some(shaped), prepped)
         } else {
-            None
+            (None, messages.to_vec())
         };
         PreparedPrompt::from_messages_with_tools(
             &self.tokenizer,
             &self.chat_template,
             &self.tokenizer_config,
-            messages,
+            &prepared_messages,
             &self.stop_token_ids,
             RenderChatTemplateOptions {
                 enable_thinking: self.options.enable_thinking,
@@ -382,6 +383,97 @@ mod tests {
                 "passthrough must emit only text; got {ev:?}"
             );
         }
+    }
+
+    #[test]
+    fn smollm3_arch_resolves_with_tools_bound() {
+        // SmolLM3 has its own arch string (`SmolLM3ForCausalLM`),
+        // dispatch is unambiguous.
+        let cfg = Arc::new(json!({"bos_token": "<|begin_of_text|>"}));
+        let turn = ChatTurn::new(
+            "SmolLM3ForCausalLM",
+            dummy_template(),
+            dummy_tokenizer(),
+            cfg,
+            dummy_stop_ids(),
+            Some(calculator_directory()),
+            ChatOptions::default(),
+        )
+        .expect("SmolLM3 with tools must be accepted");
+        assert!(turn.protocol().is_some());
+    }
+
+    #[test]
+    fn llama3_chatml_llama_resolves_to_llama3_protocol() {
+        // Llama 3.x Instruct: arch=`LlamaForCausalLM`,
+        // bos=`<|begin_of_text|>`. Must NOT be unsupported.
+        let cfg = Arc::new(json!({"bos_token": "<|begin_of_text|>"}));
+        let turn = ChatTurn::new(
+            "LlamaForCausalLM",
+            dummy_template(),
+            dummy_tokenizer(),
+            cfg,
+            dummy_stop_ids(),
+            Some(calculator_directory()),
+            ChatOptions::default(),
+        )
+        .expect("Llama 3 Instruct with tools must be accepted");
+        assert!(turn.protocol().is_some());
+    }
+
+    #[test]
+    fn vanilla_llama_with_s_bos_remains_unsupported() {
+        // Llama 1/2 / Mistral chat: bos=`<s>`. No native tool dialect.
+        let cfg = Arc::new(json!({"bos_token": "<s>"}));
+        let err = ChatTurn::new(
+            "LlamaForCausalLM",
+            dummy_template(),
+            dummy_tokenizer(),
+            cfg,
+            dummy_stop_ids(),
+            Some(calculator_directory()),
+            ChatOptions::default(),
+        )
+        .expect_err("vanilla Llama 1/2 must remain unsupported");
+        assert!(err.to_string().contains("does not support tool calling"));
+    }
+
+    #[test]
+    fn smollm2_chatml_tokenizer_resolves_to_smollm2_protocol() {
+        // Critical wiring test: SmolLM2 reports `LlamaForCausalLM`
+        // (same as vanilla Llama) but its ChatML tokenizer should
+        // route to the SmolLM2 protocol, not yield "unsupported".
+        let cfg = Arc::new(json!({"bos_token": "<|im_start|>"}));
+        let turn = ChatTurn::new(
+            "LlamaForCausalLM",
+            dummy_template(),
+            dummy_tokenizer(),
+            cfg,
+            dummy_stop_ids(),
+            Some(calculator_directory()),
+            ChatOptions::default(),
+        )
+        .expect("SmolLM2-style ChatML llama with tools must be accepted");
+        let proto = turn
+            .protocol()
+            .expect("SmolLM2 protocol must be bound");
+        // Verify it's the SmolLM2 protocol by behavior: prepare_messages
+        // injects a system message with `<tool_call>` documentation.
+        let injected = (proto.prepare_messages)(
+            &[ToolSpec::new(
+                "x",
+                None,
+                json!({"type": "object", "properties": {}}),
+            )],
+            vec![types::Message::OpenAI(Box::new(
+                types::openai::ChatMessage::user("hi"),
+            ))],
+        );
+        assert_eq!(injected.len(), 2);
+        let types::Message::OpenAI(first) = &injected[0] else {
+            panic!("expected OpenAI system message");
+        };
+        assert_eq!(first.role, "system");
     }
 
     #[test]

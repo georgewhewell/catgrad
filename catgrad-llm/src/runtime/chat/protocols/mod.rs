@@ -7,7 +7,11 @@
 //! patch) consults the [`tool_protocol_for`](super::tool_protocol_for)
 //! registry and rejects the turn at construction time.
 
+pub mod json_sentinel;
+pub mod llama3;
 pub mod qwen3;
+pub mod smollm2;
+pub mod smollm3;
 
 #[cfg(test)]
 pub(crate) mod test_util;
