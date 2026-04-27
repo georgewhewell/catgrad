@@ -151,6 +151,13 @@ const GPT_OSS: ToolCallProtocol = ToolCallProtocol {
     prepare_messages: protocols::gpt_oss::prepare_messages,
 };
 
+const GEMMA4: ToolCallProtocol = ToolCallProtocol {
+    render_tools: protocols::gemma4::render_tools,
+    make_parser: protocols::gemma4::make_parser,
+    supports_parallel_calls: true,
+    prepare_messages: protocols::gemma4::prepare_messages,
+};
+
 /// Lookup table from `(arch, tokenizer_config)` to the architecture's
 /// tool-call protocol. Returns `None` for architectures that do not
 /// support tool calling (or that have not yet been ported to the
@@ -168,6 +175,8 @@ pub fn tool_protocol_for(
 ) -> Option<&'static ToolCallProtocol> {
     match arch {
         "Qwen3ForCausalLM" | "Qwen3MoeForCausalLM" => Some(&QWEN3),
+        // Gemma 4 — separate `Gemma4ForConditionalGeneration` arch.
+        "Gemma4ForConditionalGeneration" => Some(&GEMMA4),
         // Qwen3.5 family — text and conditional-generation variants
         // share the same XML-in-`<tool_call>` dialect.
         "Qwen3_5ForCausalLM"
@@ -243,6 +252,12 @@ mod tests {
         assert!(tool_protocol_for("MistralForCausalLM", &cfg).is_some());
         assert!(tool_protocol_for("Phi3ForCausalLM", &cfg).is_some());
         assert!(tool_protocol_for("GptOssForCausalLM", &cfg).is_some());
+    }
+
+    #[test]
+    fn gemma4_architecture_resolves_to_protocol() {
+        let cfg = JsonValue::Null;
+        assert!(tool_protocol_for("Gemma4ForConditionalGeneration", &cfg).is_some());
     }
 
     #[test]
