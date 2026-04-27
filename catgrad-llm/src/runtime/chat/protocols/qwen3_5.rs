@@ -139,131 +139,15 @@ mod tests {
         assert_eq!(last_stop_reason(&events), StopReason::EndOfText);
     }
 
-    #[test]
-    fn valid_call_with_multiple_parameters() {
-        // String + number args; confirms parse_scalar's JSON-promotion of
-        // numeric and quoted-string values.
-        let mut p = make_parser(directory_with_calculator());
-        let events = run(
-            &mut *p,
-            &[
-                "<tool_call>\n<function=calculator>\n<parameter=lhs>1353785</parameter>\n<parameter=rhs>790489</parameter>\n<parameter=op>\"div\"</parameter>\n</function>\n</tool_call>",
-            ],
-        );
-        let DecodeEvent::ToolCallEnd { args, .. } = &events[2] else {
-            panic!("got {:?}", events)
-        };
-        assert_eq!(args["lhs"], json!(1353785));
-        assert_eq!(args["rhs"], json!(790489));
-        assert_eq!(args["op"], json!("div"));
-        assert_eq!(last_stop_reason(&events), StopReason::EndOfText);
-    }
-
-    #[test]
-    fn parameter_value_falls_back_to_bare_string() {
-        // Bare `div` (no quotes) — JSON parse fails, fall back to string.
-        let mut p = make_parser(directory_with_calculator());
-        let events = run(
-            &mut *p,
-            &[
-                "<tool_call>\n<function=calculator>\n<parameter=lhs>1</parameter>\n<parameter=rhs>2</parameter>\n<parameter=op>div</parameter>\n</function>\n</tool_call>",
-            ],
-        );
-        let DecodeEvent::ToolCallEnd { args, .. } = &events[2] else {
-            panic!("got {:?}", events)
-        };
-        assert_eq!(args["op"], json!("div"));
-        assert_eq!(last_stop_reason(&events), StopReason::EndOfText);
-    }
-
-    #[test]
-    fn multiple_calls_in_sequence() {
-        let mut p = make_parser(directory_with_add());
-        let events = run(
-            &mut *p,
-            &[
-                "<tool_call>\n<function=add>\n<parameter=a>1</parameter>\n<parameter=b>2</parameter>\n</function>\n</tool_call>",
-                "<tool_call>\n<function=add>\n<parameter=a>3</parameter>\n<parameter=b>4</parameter>\n</function>\n</tool_call>",
-            ],
-        );
-        // Start(0), ArgsDelta(0), End(0), Start(1), ArgsDelta(1), End(1), Stop
-        assert_eq!(events.len(), 7);
-        assert!(matches!(
-            &events[0],
-            DecodeEvent::ToolCallStart { index: 0, name } if name == "add"
-        ));
-        assert!(matches!(
-            &events[3],
-            DecodeEvent::ToolCallStart { index: 1, name } if name == "add"
-        ));
-        assert_eq!(last_stop_reason(&events), StopReason::EndOfText);
-    }
-
-    #[test]
-    fn text_then_call_then_text_in_single_feed() {
-        let mut p = make_parser(directory_with_add());
-        let events = run(
-            &mut *p,
-            &[
-                "first <tool_call><function=add><parameter=a>1</parameter><parameter=b>2</parameter></function></tool_call> last",
-            ],
-        );
-        assert!(matches!(
-            &events[0],
-            DecodeEvent::TextDelta(s) if s == "first "
-        ));
-        assert!(matches!(&events[1], DecodeEvent::ToolCallStart { .. }));
-        assert!(matches!(&events[2], DecodeEvent::ToolCallArgsDelta { .. }));
-        assert!(matches!(&events[3], DecodeEvent::ToolCallEnd { .. }));
-        assert!(matches!(
-            &events[4],
-            DecodeEvent::TextDelta(s) if s == " last"
-        ));
-        assert_eq!(last_stop_reason(&events), StopReason::EndOfText);
-    }
 
 
 
 
-    #[test]
-    fn malformed_parameter_tag_is_terminal_with_protocol_error() {
-        // <parameter=a missing its closing '>' — this hits the
-        // "unterminated <parameter=...> tag" branch.
-        let mut p = make_parser(directory_with_add());
-        let events = run(
-            &mut *p,
-            &[
-                "<tool_call><function=add><parameter=a 1</parameter></function></tool_call>",
-            ],
-        );
-        let DecodeEvent::ParseError { source, .. } = &events[0] else {
-            panic!("expected ParseError, got {events:?}");
-        };
-        assert!(matches!(source, ParserError::Malformed(_)));
-        assert_eq!(last_stop_reason(&events), StopReason::ProtocolError);
-    }
 
-    #[test]
-    fn missing_function_block_is_terminal_with_protocol_error() {
-        let mut p = make_parser(directory_with_add());
-        let events = run(
-            &mut *p,
-            &["<tool_call>just some text without a function block</tool_call>"],
-        );
-        let DecodeEvent::ParseError { source, .. } = &events[0] else {
-            panic!("expected ParseError, got {events:?}");
-        };
-        assert!(matches!(source, ParserError::Malformed(_)));
-        assert_eq!(last_stop_reason(&events), StopReason::ProtocolError);
-    }
 
-    #[test]
-    fn empty_payload_is_terminal_with_protocol_error() {
-        let mut p = make_parser(directory_with_add());
-        let events = run(&mut *p, &["<tool_call></tool_call>"]);
-        assert!(matches!(&events[0], DecodeEvent::ParseError { .. }));
-        assert_eq!(last_stop_reason(&events), StopReason::ProtocolError);
-    }
+
+
+
 
     #[test]
     fn unterminated_tool_call_is_terminal_with_protocol_error() {
@@ -345,63 +229,4 @@ mod tests {
     // Codec helper tests (parse_scalar / parse_function_block)
     // moved into `codecs::xml_function` — they belong with the
     // implementation, not the protocol-specific module.
-}
-
-#[cfg(test)]
-mod proptests {
-    //! Chunk-invariance: feeding the same model output as one string
-    //! versus split across arbitrary boundaries produces the same final
-    //! decoded turn (or the same DecodeFailure).
-
-    use super::*;
-    use crate::runtime::chat::protocols::test_util;
-    use proptest::prelude::*;
-
-    fn interesting_inputs() -> Vec<&'static str> {
-        vec![
-            // plain text
-            "hello world",
-            // single valid call
-            "<tool_call><function=add><parameter=a>1</parameter><parameter=b>2</parameter></function></tool_call>",
-            // call with newlines (the canonical chat-template shape)
-            "<tool_call>\n<function=add>\n<parameter=a>1</parameter>\n<parameter=b>2</parameter>\n</function>\n</tool_call>",
-            // call with surrounding text
-            "prefix <tool_call><function=add><parameter=a>1</parameter><parameter=b>2</parameter></function></tool_call> suffix",
-            // two calls in sequence
-            "<tool_call><function=add><parameter=a>1</parameter><parameter=b>2</parameter></function></tool_call><tool_call><function=add><parameter=a>3</parameter><parameter=b>4</parameter></function></tool_call>",
-            // sentinel-shaped text that isn't a sentinel
-            "the docs say <tool_call but it's just text",
-            // unknown tool (fatal — chunk-invariance still holds)
-            "<tool_call><function=missing></function></tool_call>",
-            // bare-string parameter value falling back through parse_scalar
-            "<tool_call><function=add><parameter=a>not_json</parameter><parameter=b>2</parameter></function></tool_call>",
-        ]
-    }
-
-    proptest! {
-        #[test]
-        fn two_way_split_is_invariant(
-            input_idx in 0_usize..8,
-            split in 0_usize..400,
-        ) {
-            let inputs = interesting_inputs();
-            let text = inputs[input_idx];
-            let whole = test_util::decode_whole(make_parser, text);
-            let chunked = test_util::decode_chunked(make_parser, text, &[split]);
-            prop_assert_eq!(format!("{:?}", whole), format!("{:?}", chunked));
-        }
-
-        #[test]
-        fn n_way_split_is_invariant(
-            input_idx in 0_usize..8,
-            mut splits in prop::collection::vec(0_usize..400, 1..5),
-        ) {
-            let inputs = interesting_inputs();
-            let text = inputs[input_idx];
-            splits.sort_unstable();
-            let whole = test_util::decode_whole(make_parser, text);
-            let chunked = test_util::decode_chunked(make_parser, text, &splits);
-            prop_assert_eq!(format!("{:?}", whole), format!("{:?}", chunked));
-        }
-    }
 }

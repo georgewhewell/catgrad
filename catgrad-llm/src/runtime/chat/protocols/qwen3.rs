@@ -113,31 +113,7 @@ mod tests {
 
 
 
-    #[test]
-    fn missing_name_field_is_terminal_with_protocol_error() {
-        let dir = directory_with_add();
-        let mut p = make_parser(dir);
-        let events = run(&mut *p, &[r#"<tool_call>{"arguments":{}}</tool_call>"#]);
-        assert_eq!(events.len(), 2);
-        let DecodeEvent::ParseError { source, .. } = &events[0] else {
-            panic!("expected ParseError, got {events:?}");
-        };
-        assert!(matches!(source, ParserError::MissingField("name")));
-        assert_eq!(last_stop_reason(&events), StopReason::ProtocolError);
-    }
 
-    #[test]
-    fn parameters_key_is_accepted_as_arguments() {
-        let dir = directory_with_add();
-        let mut p = make_parser(dir);
-        let events = run(
-            &mut *p,
-            &[r#"<tool_call>{"name":"add","parameters":{"a":1,"b":2}}</tool_call>"#],
-        );
-        assert!(matches!(&events[0], DecodeEvent::ToolCallStart { .. }));
-        assert!(matches!(&events[2], DecodeEvent::ToolCallEnd { .. }));
-        assert_eq!(last_stop_reason(&events), StopReason::EndOfText);
-    }
 
     #[test]
     fn raw_json_without_sentinel_is_plain_text() {
@@ -230,63 +206,7 @@ mod tests {
         assert_eq!(text, "héllo ");
     }
 
-    #[test]
-    fn multiple_valid_tool_calls_in_sequence() {
-        let mul = ToolSpec::new(
-            "mul",
-            None,
-            json!({
-                "type": "object",
-                "properties": {
-                    "a": { "type": "number" },
-                    "b": { "type": "number" },
-                },
-                "required": ["a", "b"],
-            }),
-        );
-        let dir = Arc::new(ToolDirectory::new(vec![add_tool(), mul]).unwrap());
-        let mut p = make_parser(dir);
-        let events = run(
-            &mut *p,
-            &[
-                r#"<tool_call>{"name":"add","arguments":{"a":1,"b":2}}</tool_call>"#,
-                r#"<tool_call>{"name":"mul","arguments":{"a":3,"b":4}}</tool_call>"#,
-            ],
-        );
-        // Start(0,add), ArgsDelta(0), End(0), Start(1,mul), ArgsDelta(1), End(1), Stop
-        assert_eq!(events.len(), 7);
-        assert!(matches!(
-            &events[0],
-            DecodeEvent::ToolCallStart { index: 0, name } if name == "add"
-        ));
-        assert!(matches!(
-            &events[3],
-            DecodeEvent::ToolCallStart { index: 1, name } if name == "mul"
-        ));
-        assert_eq!(last_stop_reason(&events), StopReason::EndOfText);
-    }
 
-    #[test]
-    fn text_then_call_then_text_in_single_feed() {
-        let dir = directory_with_add();
-        let mut p = make_parser(dir);
-        let events = run(
-            &mut *p,
-            &[r#"first <tool_call>{"name":"add","arguments":{"a":1,"b":2}}</tool_call> last"#],
-        );
-        assert!(matches!(
-            &events[0],
-            DecodeEvent::TextDelta(s) if s == "first "
-        ));
-        assert!(matches!(&events[1], DecodeEvent::ToolCallStart { .. }));
-        assert!(matches!(&events[2], DecodeEvent::ToolCallArgsDelta { .. }));
-        assert!(matches!(&events[3], DecodeEvent::ToolCallEnd { .. }));
-        assert!(matches!(
-            &events[4],
-            DecodeEvent::TextDelta(s) if s == " last"
-        ));
-        assert_eq!(last_stop_reason(&events), StopReason::EndOfText);
-    }
 
     #[test]
     fn unterminated_tool_call_is_terminal_with_protocol_error() {
@@ -321,14 +241,6 @@ mod tests {
         assert_eq!(last_stop_reason(&events), StopReason::ProtocolError);
     }
 
-    #[test]
-    fn empty_payload_is_terminal_parse_error() {
-        let dir = directory_with_add();
-        let mut p = make_parser(dir);
-        let events = run(&mut *p, &["<tool_call></tool_call>"]);
-        assert!(matches!(&events[0], DecodeEvent::ParseError { .. }));
-        assert_eq!(last_stop_reason(&events), StopReason::ProtocolError);
-    }
 
 
     #[test]
@@ -398,55 +310,5 @@ mod tests {
             !msg.contains(secret),
             "oversized payload error message must not include payload bytes; got: {msg}"
         );
-    }
-}
-
-#[cfg(test)]
-mod proptests {
-    //! Chunk-invariance: feeding the same model output as one string
-    //! versus split across chunk boundaries produces the same final
-    //! decoded turn (or the same DecodeFailure).
-
-    use super::*;
-    use crate::runtime::chat::protocols::test_util;
-    use proptest::prelude::*;
-
-    fn interesting_inputs() -> Vec<&'static str> {
-        vec![
-            "hello world",
-            r#"<tool_call>{"name":"add","arguments":{"a":1,"b":2}}</tool_call>"#,
-            r#"prefix <tool_call>{"name":"add","arguments":{"a":1,"b":2}}</tool_call> suffix"#,
-            r#"<tool_call>{"name":"add","arguments":{"a":1,"b":2}}</tool_call><tool_call>{"name":"add","arguments":{"a":3,"b":4}}</tool_call>"#,
-            "the docs say <tool_call> but it's just text",
-            r#"<tool_call>{"name":"missing","arguments":{}}</tool_call>"#,
-            r#"<tool_call>{"name":"add","arguments":{"a":1,"b":2}}</tool_call> done"#,
-        ]
-    }
-
-    proptest! {
-        #[test]
-        fn two_way_split_is_invariant(
-            input_idx in 0_usize..7,
-            split in 0_usize..200,
-        ) {
-            let inputs = interesting_inputs();
-            let text = inputs[input_idx];
-            let whole = test_util::decode_whole(make_parser, text);
-            let chunked = test_util::decode_chunked(make_parser, text, &[split]);
-            prop_assert_eq!(format!("{:?}", whole), format!("{:?}", chunked));
-        }
-
-        #[test]
-        fn n_way_split_is_invariant(
-            input_idx in 0_usize..7,
-            mut splits in prop::collection::vec(0_usize..200, 1..5),
-        ) {
-            let inputs = interesting_inputs();
-            let text = inputs[input_idx];
-            splits.sort_unstable();
-            let whole = test_util::decode_whole(make_parser, text);
-            let chunked = test_util::decode_chunked(make_parser, text, &splits);
-            prop_assert_eq!(format!("{:?}", whole), format!("{:?}", chunked));
-        }
     }
 }

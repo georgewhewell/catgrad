@@ -219,17 +219,6 @@ mod tests {
         assert!(matches!(&events[2], DecodeEvent::ToolCallEnd { .. }));
     }
 
-    /// SmolLM2's "no tool needed" reply is the literal string
-    /// `<tool_call>[]</tool_call>`. It must not become a fatal parse
-    /// error — operator gets a clean turn with no tool calls.
-    #[test]
-    fn parser_accepts_empty_array_as_no_call() {
-        let mut p = make_parser(directory_with_add());
-        let events = run(&mut *p, &["<tool_call>[]</tool_call>"]);
-        // No ToolCallStart events; the parser passes through to Stop.
-        assert!(!events.iter().any(|e| matches!(e, DecodeEvent::ToolCallStart { .. })));
-        assert!(matches!(events.last(), Some(DecodeEvent::Stop { .. })));
-    }
 
     #[test]
     fn parser_handles_multiple_calls_in_one_array() {
@@ -257,19 +246,6 @@ mod tests {
         assert!(matches!(&events[3], DecodeEvent::ToolCallStart { index: 1, name } if name == "mul"));
     }
 
-    /// Spec-shape echo defence: model emits the OpenAI tool-spec
-    /// envelope `{"type":"function","function":{"name":...,
-    /// "arguments":...}}` instead of the response shape. Peel and
-    /// recover.
-    #[test]
-    fn parser_peels_openai_function_envelope() {
-        let mut p = make_parser(directory_with_add());
-        let events = run(
-            &mut *p,
-            &[r#"<tool_call>[{"type":"function","function":{"name":"add","arguments":{"a":1,"b":2}}}]</tool_call>"#],
-        );
-        assert!(matches!(&events[0], DecodeEvent::ToolCallStart { name, .. } if name == "add"));
-    }
 
     #[test]
     fn prepare_messages_prepends_system_when_none_present() {
@@ -316,37 +292,5 @@ mod tests {
         let messages = prepare_messages(&[], vec![user.clone()]);
         assert_eq!(messages.len(), 1);
         assert_eq!(&messages[0], &user);
-    }
-}
-
-#[cfg(test)]
-mod proptests {
-    use super::*;
-    use crate::runtime::chat::protocols::test_util;
-    use proptest::prelude::*;
-
-    fn interesting_inputs() -> Vec<&'static str> {
-        vec![
-            "hello world",
-            r#"<tool_call>{"name":"add","arguments":{"a":1,"b":2}}</tool_call>"#,
-            r#"prefix <tool_call>{"name":"add","arguments":{"a":1,"b":2}}</tool_call> suffix"#,
-            r#"<tool_call>{"name":"add","arguments":{"a":1,"b":2}}</tool_call><tool_call>{"name":"add","arguments":{"a":3,"b":4}}</tool_call>"#,
-            "the docs say <tool_call> but it's just text",
-            r#"<tool_call>{"name":"missing","arguments":{}}</tool_call>"#,
-        ]
-    }
-
-    proptest! {
-        #[test]
-        fn two_way_split_is_invariant(
-            input_idx in 0_usize..6,
-            split in 0_usize..200,
-        ) {
-            let inputs = interesting_inputs();
-            let text = inputs[input_idx];
-            let whole = test_util::decode_whole(make_parser, text);
-            let chunked = test_util::decode_chunked(make_parser, text, &[split]);
-            prop_assert_eq!(format!("{:?}", whole), format!("{:?}", chunked));
-        }
     }
 }

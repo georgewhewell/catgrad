@@ -101,130 +101,15 @@ mod tests {
     }
 
 
-    #[test]
-    fn pythonic_call_with_outer_list() {
-        let mut p = Olmo3Parser::new(directory_with_calculator());
-        let events = run(
-            &mut p,
-            &[
-                "<function_calls>[calculator(lhs=1353785, rhs=790489, op=\"div\")]</function_calls>",
-            ],
-        );
-        // Start, ArgsDelta, End, Stop
-        assert_eq!(events.len(), 4);
-        assert!(matches!(
-            &events[0],
-            DecodeEvent::ToolCallStart { index: 0, name } if name == "calculator"
-        ));
-        let DecodeEvent::ToolCallEnd { index: 0, args } = &events[2] else {
-            panic!("expected ToolCallEnd, got {:?}", events[2]);
-        };
-        assert_eq!(args["lhs"], json!(1353785));
-        assert_eq!(args["rhs"], json!(790489));
-        assert_eq!(args["op"], json!("div"));
-        assert_eq!(last_stop_reason(&events), StopReason::EndOfText);
-    }
-
-    #[test]
-    fn pythonic_call_without_outer_list() {
-        // Bare `name(args)` (no enclosing `[...]`) is also accepted —
-        // matches the chat template's modern path which renders bare
-        // `name(args)` per call.
-        let mut p = Olmo3Parser::new(directory_with_add());
-        let events = run(
-            &mut p,
-            &["<function_calls>add(a=1, b=2)</function_calls>"],
-        );
-        assert_eq!(events.len(), 4);
-        assert!(matches!(&events[0], DecodeEvent::ToolCallStart { .. }));
-        let DecodeEvent::ToolCallEnd { args, .. } = &events[2] else {
-            panic!()
-        };
-        assert_eq!(args, &json!({"a": 1, "b": 2}));
-    }
-
-    #[test]
-    fn pythonic_single_quoted_string_arg() {
-        let mut p = Olmo3Parser::new(directory_with_calculator());
-        let events = run(
-            &mut p,
-            &["<function_calls>[calculator(lhs=1, rhs=2, op='div')]</function_calls>"],
-        );
-        let DecodeEvent::ToolCallEnd { args, .. } = &events[2] else {
-            panic!("got {:?}", events)
-        };
-        assert_eq!(args["op"], json!("div"));
-    }
-
-    #[test]
-    fn multiple_calls_in_sequence_emit_sequential_indices() {
-        let mut p = Olmo3Parser::new(directory_with_add());
-        let events = run(
-            &mut p,
-            &["<function_calls>[add(a=1,b=2), add(a=3,b=4)]</function_calls>"],
-        );
-        // Two triples + Stop = 7 events.
-        assert_eq!(events.len(), 7);
-        assert!(matches!(
-            &events[0],
-            DecodeEvent::ToolCallStart { index: 0, .. }
-        ));
-        assert!(matches!(
-            &events[3],
-            DecodeEvent::ToolCallStart { index: 1, .. }
-        ));
-        assert_eq!(last_stop_reason(&events), StopReason::EndOfText);
-    }
-
-    #[test]
-    fn multiple_blocks_keep_indices_sequential() {
-        let mut p = Olmo3Parser::new(directory_with_add());
-        let events = run(
-            &mut p,
-            &[
-                "<function_calls>[add(a=1,b=2)]</function_calls>",
-                "<function_calls>[add(a=3,b=4)]</function_calls>",
-            ],
-        );
-        assert!(matches!(
-            &events[0],
-            DecodeEvent::ToolCallStart { index: 0, .. }
-        ));
-        assert!(matches!(
-            &events[3],
-            DecodeEvent::ToolCallStart { index: 1, .. }
-        ));
-    }
-
-    #[test]
-    fn text_then_call_then_text_in_single_feed() {
-        let mut p = Olmo3Parser::new(directory_with_add());
-        let events = run(
-            &mut p,
-            &["first <function_calls>[add(a=1,b=2)]</function_calls> last"],
-        );
-        assert!(matches!(
-            &events[0],
-            DecodeEvent::TextDelta(s) if s == "first "
-        ));
-        assert!(matches!(&events[1], DecodeEvent::ToolCallStart { .. }));
-        assert!(matches!(
-            &events[4],
-            DecodeEvent::TextDelta(s) if s == " last"
-        ));
-        assert_eq!(last_stop_reason(&events), StopReason::EndOfText);
-    }
 
 
 
 
-    #[test]
-    fn empty_payload_is_terminal() {
-        let mut p = Olmo3Parser::new(directory_with_add());
-        let events = run(&mut p, &["<function_calls></function_calls>"]);
-        assert!(matches!(&events[0], DecodeEvent::ParseError { .. }));
-        assert_eq!(last_stop_reason(&events), StopReason::ProtocolError);
-    }
+
+
+
+
+
 
     #[test]
     fn unterminated_block_at_eos_is_terminal() {
@@ -317,63 +202,4 @@ mod tests {
     // `codecs::pythonic` module — they test the codec, not the OLMo-3
     // wire frame, so they live with the implementation.
 
-}
-
-#[cfg(test)]
-mod proptests {
-    //! Chunk-invariance: feeding the same model output as one string
-    //! versus split across arbitrary boundaries produces the same final
-    //! decoded turn (or the same DecodeFailure).
-
-    use super::*;
-    use crate::runtime::chat::protocols::test_util;
-    use proptest::prelude::*;
-
-    fn interesting_inputs() -> Vec<&'static str> {
-        vec![
-            // plain text
-            "hello world",
-            // Pythonic with outer list
-            "<function_calls>[add(a=1,b=2)]</function_calls>",
-            // Pythonic without outer list
-            "<function_calls>add(a=1,b=2)</function_calls>",
-            // Two pythonic calls in one block
-            "<function_calls>[add(a=1,b=2), add(a=3,b=4)]</function_calls>",
-            // Sentinel-shaped text that isn't a sentinel
-            "the docs say <function_call but it's just text",
-            // Call wrapped in surrounding text
-            "prefix <function_calls>add(a=1,b=2)</function_calls> suffix",
-            // String args with single quotes
-            "<function_calls>[add(a=1, b=2)]</function_calls> trailing",
-            // Empty trailing text
-            "<function_calls>[add(a=1,b=2)]</function_calls>",
-        ]
-    }
-
-    proptest! {
-        #[test]
-        fn two_way_split_is_invariant(
-            input_idx in 0_usize..8,
-            split in 0_usize..200,
-        ) {
-            let inputs = interesting_inputs();
-            let text = inputs[input_idx];
-            let whole = test_util::decode_whole(make_parser, text);
-            let chunked = test_util::decode_chunked(make_parser, text, &[split]);
-            prop_assert_eq!(format!("{:?}", whole), format!("{:?}", chunked));
-        }
-
-        #[test]
-        fn n_way_split_is_invariant(
-            input_idx in 0_usize..8,
-            mut splits in prop::collection::vec(0_usize..200, 1..5),
-        ) {
-            let inputs = interesting_inputs();
-            let text = inputs[input_idx];
-            splits.sort_unstable();
-            let whole = test_util::decode_whole(make_parser, text);
-            let chunked = test_util::decode_chunked(make_parser, text, &splits);
-            prop_assert_eq!(format!("{:?}", whole), format!("{:?}", chunked));
-        }
-    }
 }

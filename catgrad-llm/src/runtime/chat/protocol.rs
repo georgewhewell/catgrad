@@ -95,6 +95,28 @@ pub struct ProtocolExamples {
     /// start a block then stuff an oversize body, asserting the
     /// payload-too-large error.
     pub open_sentinel_only: &'static str,
+    /// Wire-encoded sequence of TWO valid calls to `add`: first
+    /// `{a:1, b:2}`, then `{a:3, b:4}`. Encoding is dialect-specific
+    /// — some protocols put both in one block (lfm2, granite,
+    /// olmo3, mistral3, phi4, smollm2), others use two consecutive
+    /// blocks (qwen3, qwen3_5, smollm3, nemotron, gemma4). Both
+    /// shapes are valid; the harness asserts two `ToolCallStart`
+    /// events with `index: 0` and `index: 1`.
+    pub multiple_calls_add_1_2_and_3_4: &'static str,
+    /// Wire-encoded payload with leading text, a valid `add(1,2)`
+    /// call, and trailing text. Asserts the boundaries are
+    /// respected: text before sentinels is `TextDelta`, text after
+    /// is `TextDelta`, the call is its triple between them. Used to
+    /// catch parsers that swallow boundary characters or fail to
+    /// emit text outside sentinel-bounded blocks.
+    pub call_with_surrounding_text: &'static str,
+    /// Inputs that MUST yield the same `DecodeEvent` sequence under
+    /// arbitrary chunk-boundary splits. Used by the centralised
+    /// chunk-invariance proptest. Each protocol contributes a
+    /// representative set of its dialect's surface (plain text,
+    /// happy paths, boundary cases, error paths). Empty slice opts
+    /// the protocol out of the centralised proptest.
+    pub interesting_inputs: &'static [&'static str],
 }
 
 /// Capability descriptor for one model architecture's tool-calling
@@ -180,6 +202,15 @@ const QWEN3: ToolCallProtocol = ToolCallProtocol {
         invalid_args: r##"<tool_call>{"name":"add","arguments":{"a":"x","b":2}}</tool_call>"##,
         malformed_payload: r##"<tool_call>not json</tool_call>"##,
         open_sentinel_only: r##"<tool_call>"##,
+        multiple_calls_add_1_2_and_3_4: r##"<tool_call>{"name":"add","arguments":{"a":1,"b":2}}</tool_call><tool_call>{"name":"add","arguments":{"a":3,"b":4}}</tool_call>"##,
+        call_with_surrounding_text: r##"first <tool_call>{"name":"add","arguments":{"a":1,"b":2}}</tool_call> last"##,
+        interesting_inputs: &[
+            r##"hello world"##,
+            r##"<tool_call>{"name":"add","arguments":{"a":1,"b":2}}</tool_call>"##,
+            r##"prefix <tool_call>{"name":"add","arguments":{"a":1,"b":2}}</tool_call> suffix"##,
+            r##"<tool_call>{"name":"missing","arguments":{}}</tool_call>"##,
+            r##"the docs say <tool_call> but it is text"##,
+        ],
     }),
 };
 
@@ -204,6 +235,14 @@ const SMOLLM2: ToolCallProtocol = ToolCallProtocol {
         invalid_args: r##"<tool_call>[{"name":"add","arguments":{"a":"x","b":2}}]</tool_call>"##,
         malformed_payload: r##"<tool_call>not json</tool_call>"##,
         open_sentinel_only: r##"<tool_call>"##,
+        multiple_calls_add_1_2_and_3_4: r##"<tool_call>[{"name":"add","arguments":{"a":1,"b":2}},{"name":"add","arguments":{"a":3,"b":4}}]</tool_call>"##,
+        call_with_surrounding_text: r##"first <tool_call>[{"name":"add","arguments":{"a":1,"b":2}}]</tool_call> last"##,
+        interesting_inputs: &[
+            r##"hello world"##,
+            r##"<tool_call>[{"name":"add","arguments":{"a":1,"b":2}}]</tool_call>"##,
+            r##"<tool_call>[]</tool_call>"##,
+            r##"<tool_call>[{"name":"missing","arguments":{}}]</tool_call>"##,
+        ],
     }),
 };
 
@@ -226,6 +265,12 @@ const SMOLLM3: ToolCallProtocol = ToolCallProtocol {
         invalid_args: r##"<tool_call>{"name":"add","arguments":{"a":"x","b":2}}</tool_call>"##,
         malformed_payload: r##"<tool_call>not json</tool_call>"##,
         open_sentinel_only: r##"<tool_call>"##,
+        multiple_calls_add_1_2_and_3_4: r##"<tool_call>{"name":"add","arguments":{"a":1,"b":2}}</tool_call><tool_call>{"name":"add","arguments":{"a":3,"b":4}}</tool_call>"##,
+        call_with_surrounding_text: r##"first <tool_call>{"name":"add","arguments":{"a":1,"b":2}}</tool_call> last"##,
+        interesting_inputs: &[
+            r##"hello world"##,
+            r##"<tool_call>{"name":"add","arguments":{"a":1,"b":2}}</tool_call>"##,
+        ],
     }),
 };
 
@@ -268,6 +313,14 @@ const LFM2: ToolCallProtocol = ToolCallProtocol {
         invalid_args: r##"<|tool_call_start|>[add(a="x", b=2)]<|tool_call_end|>"##,
         malformed_payload: r##"<|tool_call_start|>not anything{<|tool_call_end|>"##,
         open_sentinel_only: r##"<|tool_call_start|>"##,
+        multiple_calls_add_1_2_and_3_4: r##"<|tool_call_start|>[add(a=1, b=2), add(a=3, b=4)]<|tool_call_end|>"##,
+        call_with_surrounding_text: r##"first <|tool_call_start|>[add(a=1, b=2)]<|tool_call_end|> last"##,
+        interesting_inputs: &[
+            r##"hello world"##,
+            r##"<|tool_call_start|>[add(a=1, b=2)]<|tool_call_end|>"##,
+            r##"<|tool_call_start|>[{"name":"add","arguments":{"a":1,"b":2}}]<|tool_call_end|>"##,
+            r##"<|tool_call_start|>[missing()]<|tool_call_end|>"##,
+        ],
     }),
 };
 
@@ -288,6 +341,14 @@ const QWEN3_5: ToolCallProtocol = ToolCallProtocol {
         invalid_args: r##"<tool_call><function=add><parameter=a>"x"</parameter><parameter=b>2</parameter></function></tool_call>"##,
         malformed_payload: r##"<tool_call>not xml</tool_call>"##,
         open_sentinel_only: r##"<tool_call>"##,
+        multiple_calls_add_1_2_and_3_4: r##"<tool_call><function=add><parameter=a>1</parameter><parameter=b>2</parameter></function></tool_call><tool_call><function=add><parameter=a>3</parameter><parameter=b>4</parameter></function></tool_call>"##,
+        call_with_surrounding_text: r##"first <tool_call><function=add><parameter=a>1</parameter><parameter=b>2</parameter></function></tool_call> last"##,
+        interesting_inputs: &[
+            r##"hello world"##,
+            r##"<tool_call><function=add><parameter=a>1</parameter><parameter=b>2</parameter></function></tool_call>"##,
+            r##"prefix <tool_call><function=add><parameter=a>1</parameter><parameter=b>2</parameter></function></tool_call> suffix"##,
+            r##"<tool_call>not xml</tool_call>"##,
+        ],
     }),
 };
 
@@ -308,6 +369,14 @@ const OLMO3: ToolCallProtocol = ToolCallProtocol {
         invalid_args: r##"<function_calls>[add(a="x", b=2)]</function_calls>"##,
         malformed_payload: r##"<function_calls>not pythonic{</function_calls>"##,
         open_sentinel_only: r##"<function_calls>"##,
+        multiple_calls_add_1_2_and_3_4: r##"<function_calls>[add(a=1, b=2), add(a=3, b=4)]</function_calls>"##,
+        call_with_surrounding_text: r##"first <function_calls>[add(a=1, b=2)]</function_calls> last"##,
+        interesting_inputs: &[
+            r##"hello world"##,
+            r##"<function_calls>[add(a=1, b=2)]</function_calls>"##,
+            r##"<function_calls>add(a=1, b=2)</function_calls>"##,
+            r##"<function_calls>[missing()]</function_calls>"##,
+        ],
     }),
 };
 
@@ -328,6 +397,13 @@ const NEMOTRON: ToolCallProtocol = ToolCallProtocol {
         invalid_args: r##"<tool_call><function=add><parameter=a>"x"</parameter><parameter=b>2</parameter></function></tool_call>"##,
         malformed_payload: r##"<tool_call>not xml</tool_call>"##,
         open_sentinel_only: r##"<tool_call>"##,
+        multiple_calls_add_1_2_and_3_4: r##"<tool_call><function=add><parameter=a>1</parameter><parameter=b>2</parameter></function></tool_call><tool_call><function=add><parameter=a>3</parameter><parameter=b>4</parameter></function></tool_call>"##,
+        call_with_surrounding_text: r##"first <tool_call><function=add><parameter=a>1</parameter><parameter=b>2</parameter></function></tool_call> last"##,
+        interesting_inputs: &[
+            r##"hello world"##,
+            r##"<tool_call><function=add><parameter=a>1</parameter><parameter=b>2</parameter></function></tool_call>"##,
+            r##"prefix <tool_call><function=add><parameter=a>1</parameter><parameter=b>2</parameter></function></tool_call> done"##,
+        ],
     }),
 };
 
@@ -349,6 +425,15 @@ const GRANITE: ToolCallProtocol = ToolCallProtocol {
         invalid_args: r##"<|tool_call|>[{"name":"add","arguments":{"a":"x","b":2}}]"##,
         malformed_payload: r##"<|tool_call|>not json at all"##,
         open_sentinel_only: r##"<|tool_call|>"##,
+        multiple_calls_add_1_2_and_3_4: r##"<|tool_call|>[{"name":"add","arguments":{"a":1,"b":2}},{"name":"add","arguments":{"a":3,"b":4}}]"##,
+        call_with_surrounding_text: r##"first <|tool_call|>[{"name":"add","arguments":{"a":1,"b":2}}]"##,
+        interesting_inputs: &[
+            r##"hello world"##,
+            r##"<|tool_call|>[{"name":"add","arguments":{"a":1,"b":2}}]"##,
+            r##"<|tool_call|>{"name":"add","arguments":{"a":1,"b":2}}"##,
+            r##"prefix <|tool_call|>[{"name":"add","arguments":{"a":1,"b":2}}]"##,
+            r##"the docs say <|tool_call but it is text"##,
+        ],
     }),
 };
 
@@ -370,6 +455,13 @@ const MISTRAL3: ToolCallProtocol = ToolCallProtocol {
         invalid_args: r##"[TOOL_CALLS][{"name":"add","arguments":{"a":"x","b":2}}]"##,
         malformed_payload: r##"[TOOL_CALLS]not json"##,
         open_sentinel_only: r##"[TOOL_CALLS]"##,
+        multiple_calls_add_1_2_and_3_4: r##"[TOOL_CALLS][{"name":"add","arguments":{"a":1,"b":2}},{"name":"add","arguments":{"a":3,"b":4}}]"##,
+        call_with_surrounding_text: r##"first [TOOL_CALLS][{"name":"add","arguments":{"a":1,"b":2}}]"##,
+        interesting_inputs: &[
+            r##"hello world"##,
+            r##"[TOOL_CALLS][{"name":"add","arguments":{"a":1,"b":2}}]"##,
+            r##"prefix [TOOL_CALLS][{"name":"add","arguments":{"a":1,"b":2}}]"##,
+        ],
     }),
 };
 
@@ -389,6 +481,13 @@ const PHI4: ToolCallProtocol = ToolCallProtocol {
         invalid_args: r##"functools[{"name":"add","arguments":{"a":"x","b":2}}]"##,
         malformed_payload: r##"functoolsnot json"##,
         open_sentinel_only: r##"functools"##,
+        multiple_calls_add_1_2_and_3_4: r##"functools[{"name":"add","arguments":{"a":1,"b":2}},{"name":"add","arguments":{"a":3,"b":4}}]"##,
+        call_with_surrounding_text: r##"first functools[{"name":"add","arguments":{"a":1,"b":2}}]"##,
+        interesting_inputs: &[
+            r##"hello world"##,
+            r##"functools[{"name":"add","arguments":{"a":1,"b":2}}]"##,
+            r##"prefix functools[{"name":"add","arguments":{"a":1,"b":2}}]"##,
+        ],
     }),
 };
 
@@ -420,6 +519,14 @@ const GEMMA4: ToolCallProtocol = ToolCallProtocol {
         invalid_args: r##"<|tool_call>call:add{a:<|"|>x<|"|>,b:2}<tool_call|>"##,
         malformed_payload: r##"<|tool_call>this isn't valid<tool_call|>"##,
         open_sentinel_only: r##"<|tool_call>"##,
+        multiple_calls_add_1_2_and_3_4: r##"<|tool_call>call:add{a:1,b:2}<tool_call|><|tool_call>call:add{a:3,b:4}<tool_call|>"##,
+        call_with_surrounding_text: r##"first <|tool_call>call:add{a:1,b:2}<tool_call|> last"##,
+        interesting_inputs: &[
+            r##"hello world"##,
+            r##"<|tool_call>call:add{a:1,b:2}<tool_call|>"##,
+            r##"first <|tool_call>call:add{a:1,b:2}<tool_call|> done"##,
+            r##"<|tool_call>call:missing{}<tool_call|>"##,
+        ],
     }),
 };
 

@@ -217,3 +217,147 @@ pub fn peel_spec_shape_echo(value: JsonValue) -> Option<JsonMap<String, JsonValu
         Some(object)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Decode through STRICT codec.
+    fn decode_strict(payload: &str) -> CodecOutcome {
+        JsonObjectOrArrayCodec::strict().parse(payload)
+    }
+
+    /// Decode through PERMISSIVE codec.
+    fn decode_permissive(payload: &str) -> CodecOutcome {
+        JsonObjectOrArrayCodec::permissive().parse(payload)
+    }
+
+    fn one(outcome: CodecOutcome) -> (String, JsonValue) {
+        match outcome {
+            CodecOutcome::Calls(mut c) => {
+                assert_eq!(c.len(), 1, "expected one call");
+                let dc = c.remove(0);
+                (dc.name, dc.args)
+            }
+            other => panic!("expected Calls, got {other:?}"),
+        }
+    }
+
+    /// Codec errors land in either `Error` (no items extractable) or
+    /// `PartialThenError { calls: [], error }` (the array had items
+    /// but the first failed). Both surface the same `ParserError` —
+    /// the test helper accepts either to keep tests focused on
+    /// behaviour, not control-flow variant.
+    fn err(outcome: CodecOutcome) -> ParserError {
+        match outcome {
+            CodecOutcome::Error(e) => e,
+            CodecOutcome::PartialThenError { calls, error } if calls.is_empty() => error,
+            other => panic!("expected Error or empty-PartialThenError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bare_object_payload_accepted_as_single_call() {
+        let (name, args) = one(decode_strict(r#"{"name":"add","arguments":{"a":1,"b":2}}"#));
+        assert_eq!(name, "add");
+        assert_eq!(args, json!({"a": 1, "b": 2}));
+    }
+
+    #[test]
+    fn parameters_key_accepted_as_arguments() {
+        let (name, args) = one(decode_strict(r#"[{"name":"add","parameters":{"a":1}}]"#));
+        assert_eq!(name, "add");
+        assert_eq!(args, json!({"a": 1}));
+    }
+
+    #[test]
+    fn arguments_as_json_encoded_string_is_decoded() {
+        // OpenAI's legacy `function_call.arguments` is a JSON-encoded
+        // string. Both codecs accept that and re-parse.
+        let (_, args) = one(decode_strict(
+            r#"[{"name":"add","arguments":"{\"a\":1,\"b\":2}"}]"#,
+        ));
+        assert_eq!(args, json!({"a": 1, "b": 2}));
+    }
+
+    #[test]
+    fn extra_fields_on_call_object_are_ignored() {
+        // Mistral's `id` field, etc. — only `name`/`arguments` matter.
+        let (name, args) = one(decode_strict(
+            r#"[{"name":"add","arguments":{"a":1,"b":2},"id":"abc123xyz"}]"#,
+        ));
+        assert_eq!(name, "add");
+        assert_eq!(args["a"], json!(1));
+    }
+
+    #[test]
+    fn missing_name_field_yields_missing_field_error() {
+        let e = err(decode_strict(r#"[{"arguments":{"a":1}}]"#));
+        assert!(matches!(e, ParserError::MissingField("name")));
+    }
+
+    #[test]
+    fn arguments_not_object_is_malformed() {
+        let e = err(decode_strict(r#"[{"name":"add","arguments":"plain"}]"#));
+        assert!(matches!(e, ParserError::Json(_) | ParserError::Malformed(_)));
+    }
+
+    #[test]
+    fn name_not_string_is_malformed() {
+        let e = err(decode_strict(r#"[{"name":42,"arguments":{}}]"#));
+        assert!(matches!(e, ParserError::Malformed(m) if m.contains("name")));
+    }
+
+    #[test]
+    fn empty_payload_is_malformed() {
+        assert!(matches!(decode_strict(""), CodecOutcome::Error(ParserError::Malformed(_))));
+        assert!(matches!(decode_strict("   "), CodecOutcome::Error(ParserError::Malformed(_))));
+    }
+
+    #[test]
+    fn empty_array_strict_is_malformed() {
+        let e = err(decode_strict("[]"));
+        assert!(matches!(e, ParserError::Malformed(m) if m.contains("contained no calls")));
+    }
+
+    #[test]
+    fn empty_array_permissive_is_zero_calls() {
+        // SmolLM2's "no tool needed" signal.
+        match decode_permissive("[]") {
+            CodecOutcome::Calls(c) => assert!(c.is_empty()),
+            other => panic!("expected empty Calls, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn permissive_peels_openai_function_envelope() {
+        // Llama.cpp's auto-grammar bug: model echoes back the tool spec
+        // shape `{"type":"function","function":{...}}`. Permissive
+        // codec peels that wrapper and recovers the call.
+        let (name, args) = one(decode_permissive(
+            r#"{"type":"function","function":{"name":"add","arguments":{"a":1,"b":2}}}"#,
+        ));
+        assert_eq!(name, "add");
+        assert_eq!(args, json!({"a": 1, "b": 2}));
+    }
+
+    #[test]
+    fn strict_does_not_peel_openai_envelope() {
+        // STRICT codec rejects the echo.
+        let e = err(decode_strict(
+            r#"{"type":"function","function":{"name":"add","arguments":{"a":1,"b":2}}}"#,
+        ));
+        // Either a missing `name` (the wrapper has none) or a malformed
+        // shape — both acceptable.
+        assert!(matches!(
+            e,
+            ParserError::MissingField("name") | ParserError::Malformed(_) | ParserError::Json(_)
+        ));
+    }
+
+    #[test]
+    fn malformed_json_yields_json_error() {
+        assert!(matches!(decode_strict("not json"), CodecOutcome::Error(ParserError::Json(_))));
+    }
+}

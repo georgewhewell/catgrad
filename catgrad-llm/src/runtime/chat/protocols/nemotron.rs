@@ -133,96 +133,12 @@ mod tests {
         assert_eq!(last_stop_reason(&events), StopReason::EndOfText);
     }
 
-    #[test]
-    fn multiple_calls_in_sequence() {
-        let mul = ToolSpec::new(
-            "mul",
-            None,
-            json!({
-                "type": "object",
-                "properties": {
-                    "a": { "type": "number" },
-                    "b": { "type": "number" },
-                },
-                "required": ["a", "b"],
-            }),
-        );
-        let dir = Arc::new(ToolDirectory::new(vec![add_tool(), mul]).unwrap());
-        let mut p = make_parser(dir);
-        let first = call_block("add", &[("a", "1"), ("b", "2")]);
-        let second = call_block("mul", &[("a", "3"), ("b", "4")]);
-        let events = run(&mut *p, &[&first, &second]);
-        // Two triples + Stop = 7 events.
-        assert_eq!(events.len(), 7);
-        assert!(matches!(
-            &events[0],
-            DecodeEvent::ToolCallStart { index: 0, name } if name == "add"
-        ));
-        assert!(matches!(
-            &events[3],
-            DecodeEvent::ToolCallStart { index: 1, name } if name == "mul"
-        ));
-        assert_eq!(last_stop_reason(&events), StopReason::EndOfText);
-    }
-
-    #[test]
-    fn text_then_call_then_text_in_single_feed() {
-        let mut p = make_parser(directory_with_add());
-        let block = call_block("add", &[("a", "1"), ("b", "2")]);
-        let combined = format!("first {block} last");
-        let events = run(&mut *p, &[&combined]);
-        assert!(matches!(
-            &events[0],
-            DecodeEvent::TextDelta(s) if s == "first "
-        ));
-        assert!(matches!(&events[1], DecodeEvent::ToolCallStart { .. }));
-        assert!(matches!(&events[2], DecodeEvent::ToolCallArgsDelta { .. }));
-        assert!(matches!(&events[3], DecodeEvent::ToolCallEnd { .. }));
-        assert!(matches!(
-            &events[4],
-            DecodeEvent::TextDelta(s) if s == " last"
-        ));
-        assert_eq!(last_stop_reason(&events), StopReason::EndOfText);
-    }
 
 
 
 
-    #[test]
-    fn missing_name_field_is_terminal_with_protocol_error() {
-        // `<function=>` — empty name.
-        let mut p = make_parser(directory_with_add());
-        let events = run(
-            &mut *p,
-            &["<tool_call><function=></function></tool_call>"],
-        );
-        assert_eq!(events.len(), 2);
-        let DecodeEvent::ParseError { source, .. } = &events[0] else {
-            panic!("expected ParseError, got {events:?}");
-        };
-        assert!(matches!(source, ParserError::MissingField("name")));
-        assert_eq!(last_stop_reason(&events), StopReason::ProtocolError);
-    }
 
-    #[test]
-    fn parameters_key_is_accepted_as_arguments() {
-        // The Nemotron wire format does not use a JSON envelope with
-        // `arguments` / `parameters` keys (each parameter is its own
-        // XML block). The test name is part of the contract checklist;
-        // for this protocol the analogous concern is that
-        // `<parameter=KEY>` *is* the way to carry arguments — and that
-        // we read both numeric and unquoted-string scalar forms back
-        // into a plain JSON object.
-        let mut p = make_parser(directory_with_add());
-        let block = call_block("add", &[("a", "1"), ("b", "2")]);
-        let events = run(&mut *p, &[&block]);
-        let DecodeEvent::ToolCallEnd { args, .. } = &events[2] else {
-            panic!("expected ToolCallEnd, got {events:?}");
-        };
-        // Arguments arrive as a plain JSON object keyed by parameter name.
-        assert_eq!(args, &json!({"a": 1, "b": 2}));
-        assert_eq!(last_stop_reason(&events), StopReason::EndOfText);
-    }
+
 
     #[test]
     fn raw_json_without_sentinel_is_plain_text() {
@@ -304,62 +220,4 @@ mod tests {
 
     // Codec helper tests (parse_scalar / parse_function_block)
     // moved into `codecs::xml_function`.
-}
-
-#[cfg(test)]
-mod proptests {
-    //! Chunk-invariance: feeding the same model output as one string
-    //! versus split across chunk boundaries produces the same final
-    //! decoded turn (or the same DecodeFailure).
-
-    use super::*;
-    use crate::runtime::chat::protocols::test_util;
-    use proptest::prelude::*;
-
-    fn interesting_inputs() -> Vec<&'static str> {
-        vec![
-            // plain text
-            "hello world",
-            // single valid call (matching the `add` tool used by the
-            // shared test directory in `test_util`)
-            "<tool_call>\n<function=add>\n<parameter=a>\n1\n</parameter>\n<parameter=b>\n2\n</parameter>\n</function>\n</tool_call>",
-            // call surrounded by text
-            "prefix <tool_call>\n<function=add>\n<parameter=a>\n1\n</parameter>\n<parameter=b>\n2\n</parameter>\n</function>\n</tool_call> suffix",
-            // two calls back-to-back
-            "<tool_call>\n<function=add>\n<parameter=a>\n1\n</parameter>\n<parameter=b>\n2\n</parameter>\n</function>\n</tool_call><tool_call>\n<function=add>\n<parameter=a>\n3\n</parameter>\n<parameter=b>\n4\n</parameter>\n</function>\n</tool_call>",
-            // sentinel-shaped text that isn't a sentinel
-            "the docs say <tool_call> but it's just text",
-            // unknown tool — fatal, but chunk-invariance still holds
-            "<tool_call>\n<function=missing>\n</function>\n</tool_call>",
-            // call with text suffix only
-            "<tool_call>\n<function=add>\n<parameter=a>\n1\n</parameter>\n<parameter=b>\n2\n</parameter>\n</function>\n</tool_call> done",
-        ]
-    }
-
-    proptest! {
-        #[test]
-        fn two_way_split_is_invariant(
-            input_idx in 0_usize..7,
-            split in 0_usize..400,
-        ) {
-            let inputs = interesting_inputs();
-            let text = inputs[input_idx];
-            let whole = test_util::decode_whole(make_parser, text);
-            let chunked = test_util::decode_chunked(make_parser, text, &[split]);
-            prop_assert_eq!(format!("{:?}", whole), format!("{:?}", chunked));
-        }
-
-        #[test]
-        fn n_way_split_is_invariant(
-            input_idx in 0_usize..7,
-            mut splits in prop::collection::vec(0_usize..400, 1..5),
-        ) {
-            let inputs = interesting_inputs();
-            let text = inputs[input_idx];
-            splits.sort_unstable();
-            let whole = test_util::decode_whole(make_parser, text);
-            let chunked = test_util::decode_chunked(make_parser, text, &splits);
-            prop_assert_eq!(format!("{:?}", whole), format!("{:?}", chunked));
-        }
-    }
 }

@@ -209,3 +209,143 @@ fn find_top_level_colon(text: &str) -> Result<Option<usize>, String> {
         &super::balanced_lexer::BalancedConfig::GEMMA4,
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Decode through the codec, asserting a single successful call
+    /// and returning its `(name, args)` pair for further inspection.
+    fn decode_one(payload: &str) -> (String, JsonValue) {
+        match Gemma4Codec.parse(payload) {
+            CodecOutcome::Calls(mut calls) => {
+                assert_eq!(calls.len(), 1, "expected exactly one call");
+                let c = calls.remove(0);
+                (c.name, c.args)
+            }
+            other => panic!("expected Calls, got {other:?}"),
+        }
+    }
+
+    fn decode_err(payload: &str) -> ParserError {
+        match Gemma4Codec.parse(payload) {
+            CodecOutcome::Error(e) => e,
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn empty_args_object_parses() {
+        let (name, args) = decode_one("call:ping{}");
+        assert_eq!(name, "ping");
+        assert_eq!(args, json!({}));
+    }
+
+    #[test]
+    fn missing_call_prefix_is_error() {
+        let err = decode_err("ping{a:1}");
+        assert!(matches!(err, ParserError::Malformed(m) if m.contains("call:")));
+    }
+
+    #[test]
+    fn outdated_double_braced_template_is_rejected_with_hint() {
+        let err = decode_err(r#"{{"name":"add","arguments":{"a":1}}}"#);
+        let ParserError::Malformed(m) = err else {
+            panic!()
+        };
+        assert!(m.contains("double-braced"));
+        assert!(m.contains("discussions #20/#55"));
+    }
+
+    #[test]
+    fn function_name_with_dot_and_dash_accepted() {
+        let (name, _) = decode_one("call:tools.shell-exec{cmd:<|\"|>echo<|\"|>}");
+        assert_eq!(name, "tools.shell-exec");
+    }
+
+    #[test]
+    fn invalid_function_name_charset_rejected() {
+        let err = decode_err("call:1bad{}");
+        assert!(matches!(err, ParserError::Malformed(m) if m.contains("invalid function name")));
+    }
+
+    #[test]
+    fn empty_function_name_yields_missing_field() {
+        let err = decode_err("call:{}");
+        assert!(matches!(err, ParserError::MissingField("name")));
+    }
+
+    #[test]
+    fn boolean_argument_parses() {
+        let (_, args) = decode_one("call:f{flag:true,off:false}");
+        assert_eq!(args["flag"], json!(true));
+        assert_eq!(args["off"], json!(false));
+    }
+
+    #[test]
+    fn null_argument_parses() {
+        let (_, args) = decode_one("call:f{x:null}");
+        assert_eq!(args["x"], json!(null));
+    }
+
+    #[test]
+    fn negative_and_float_numbers_parse() {
+        let (_, args) = decode_one("call:f{a:-1,b:3.14,c:1000000}");
+        assert_eq!(args["a"], json!(-1));
+        assert_eq!(args["b"], json!(3.14));
+        assert_eq!(args["c"], json!(1_000_000));
+    }
+
+    #[test]
+    fn array_of_strings_argument_parses() {
+        let (_, args) = decode_one("call:f{xs:[<|\"|>a<|\"|>,<|\"|>b<|\"|>,<|\"|>c<|\"|>]}");
+        assert_eq!(args["xs"], json!(["a", "b", "c"]));
+    }
+
+    #[test]
+    fn nested_object_argument_parses() {
+        let (_, args) = decode_one("call:f{cfg:{nested:{depth:2}}}");
+        assert_eq!(args["cfg"], json!({"nested": {"depth": 2}}));
+    }
+
+    #[test]
+    fn string_value_with_braces_is_opaque() {
+        // The `{}` inside a `<|"|>...<|"|>` string must not be
+        // interpreted as a nested object.
+        let (_, args) = decode_one("call:f{s:<|\"|>{not an object}<|\"|>}");
+        assert_eq!(args["s"], json!("{not an object}"));
+    }
+
+    #[test]
+    fn string_value_with_brackets_is_opaque() {
+        let (_, args) = decode_one("call:f{s:<|\"|>[not, an, array]<|\"|>}");
+        assert_eq!(args["s"], json!("[not, an, array]"));
+    }
+
+    #[test]
+    fn trailing_whitespace_in_body_tolerated() {
+        let (name, args) = decode_one("call:add{a:1,b:2}   \n  ");
+        assert_eq!(name, "add");
+        assert_eq!(args, json!({"a": 1, "b": 2}));
+    }
+
+    #[test]
+    fn unterminated_string_rejected() {
+        let err = decode_err("call:f{s:<|\"|>oops");
+        assert!(matches!(err, ParserError::Malformed(_)));
+    }
+
+    #[test]
+    fn surviving_quote_sentinel_in_args_rejected() {
+        // The defensive check: if a `<|"|>` literally appears inside a
+        // parsed string value, upstream detokenization stripped half a
+        // pair. Surface as a hard error rather than ship a bogus call.
+        // (Synthesized via a malformed input that the parser does not
+        // catch but whose output trips the post-parse check.)
+        // This is hard to construct from valid wire syntax; the closest
+        // we can get is feeding mismatched sentinels.
+        // — covered indirectly by the engine-level fuzz; no asserttable
+        // unit case here.
+    }
+}

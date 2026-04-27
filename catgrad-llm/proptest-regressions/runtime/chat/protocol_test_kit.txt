@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc dfc034778f13129e112e0a7f02406f209dd2d38ed42a42e14070c44a26b81a97 # shrinks to (arch, input) = ("GraniteForCausalLM", "hello world"), mut splits = [1]
+cc fe0a0ec16b7161a2bdee3afdc8b48a700a23740f90202473daaa7ebf14e74e30 # shrinks to (arch, input) = ("GraniteForCausalLM", "hello world"), split = 1

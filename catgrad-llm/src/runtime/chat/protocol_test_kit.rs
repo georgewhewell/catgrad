@@ -100,6 +100,10 @@ fn run_scenarios_for(
 
     assert_plain_text_passes_through(arch, &dir, &make);
     assert_valid_call_emits_triple(arch, &dir, &make, ex.valid_call_add_1_2);
+    assert_multiple_calls_emit_sequential_indices(
+        arch, &dir, &make, ex.multiple_calls_add_1_2_and_3_4,
+    );
+    assert_call_with_surrounding_text(arch, &dir, &make, ex.call_with_surrounding_text);
     assert_unknown_tool_terminates(arch, &dir, &make, ex.unknown_tool);
     assert_invalid_args_terminates(arch, &dir, &make, ex.invalid_args);
     assert_malformed_payload_terminates(arch, &dir, &make, ex.malformed_payload);
@@ -144,6 +148,72 @@ fn assert_plain_text_passes_through(
         StopReason::EndOfText,
         "[{arch}] plain-text stop reason"
     );
+}
+
+fn assert_multiple_calls_emit_sequential_indices(
+    arch: &str,
+    dir: &Arc<ToolDirectory>,
+    make: &impl Fn(Arc<ToolDirectory>) -> Box<dyn IncrementalToolCallParser>,
+    input: &str,
+) {
+    let events = drive(dir, make, &[input]);
+    let starts: Vec<usize> = events
+        .iter()
+        .filter_map(|e| match e {
+            DecodeEvent::ToolCallStart { index, .. } => Some(*index),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        starts,
+        vec![0, 1],
+        "[{arch}] expected two ToolCallStart events with indices [0, 1], got events {events:#?}"
+    );
+    let ends: Vec<&JsonValue> = events
+        .iter()
+        .filter_map(|e| match e {
+            DecodeEvent::ToolCallEnd { args, .. } => Some(args),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ends.len(), 2, "[{arch}] expected two ToolCallEnd events");
+    assert_eq!(ends[0]["a"], JsonValue::from(1), "[{arch}] first call a=1");
+    assert_eq!(ends[0]["b"], JsonValue::from(2), "[{arch}] first call b=2");
+    assert_eq!(ends[1]["a"], JsonValue::from(3), "[{arch}] second call a=3");
+    assert_eq!(ends[1]["b"], JsonValue::from(4), "[{arch}] second call b=4");
+    assert_eq!(last_stop_reason(&events), StopReason::EndOfText);
+}
+
+fn assert_call_with_surrounding_text(
+    arch: &str,
+    dir: &Arc<ToolDirectory>,
+    make: &impl Fn(Arc<ToolDirectory>) -> Box<dyn IncrementalToolCallParser>,
+    input: &str,
+) {
+    let events = drive(dir, make, &[input]);
+    // Find the first ToolCallStart and the first TextDelta.
+    let first_text = events.iter().position(|e| matches!(e, DecodeEvent::TextDelta(_)));
+    let first_start = events
+        .iter()
+        .position(|e| matches!(e, DecodeEvent::ToolCallStart { .. }));
+    let (Some(text_idx), Some(start_idx)) = (first_text, first_start) else {
+        panic!(
+            "[{arch}] expected at least one TextDelta and one ToolCallStart, got {events:#?}"
+        );
+    };
+    assert!(
+        text_idx < start_idx,
+        "[{arch}] leading text must precede the call: events {events:#?}"
+    );
+    // The leading text must be non-empty (the prefix from the input).
+    let DecodeEvent::TextDelta(t) = &events[text_idx] else {
+        unreachable!()
+    };
+    assert!(
+        !t.trim().is_empty(),
+        "[{arch}] leading TextDelta must be non-empty, got `{t:?}`"
+    );
+    assert_eq!(last_stop_reason(&events), StopReason::EndOfText);
 }
 
 fn assert_valid_call_emits_triple(
@@ -324,6 +394,116 @@ pub fn make_parser_for(
     directory: Arc<ToolDirectory>,
 ) -> Box<dyn IncrementalToolCallParser> {
     protocol_for(arch, bos_token).make_parser(directory)
+}
+
+/// Centralized chunk-invariance proptest: pick a random (arch, input)
+/// pair from the registry, split the input at random byte offsets,
+/// and confirm the resulting events match the unsplit run. Replaces
+/// per-protocol `mod proptests` blocks.
+mod centralized_proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn arch_and_input_strategy() -> impl Strategy<Value = (&'static str, &'static str)> {
+        let pairs: Vec<(&'static str, &'static str)> = ARCHES
+            .iter()
+            .filter_map(|spec| {
+                let cfg = spec.cfg();
+                let proto = tool_protocol_for(spec.arch, &cfg)?;
+                let ex = proto.examples?;
+                Some((spec.arch, ex.interesting_inputs))
+            })
+            .flat_map(|(arch, inputs)| inputs.iter().map(move |inp| (arch, *inp)))
+            .collect();
+        // proptest's `prop::sample::select` requires at least one element.
+        assert!(
+            !pairs.is_empty(),
+            "no (arch, input) pairs registered for chunk-invariance proptest"
+        );
+        proptest::sample::select(pairs)
+    }
+
+    /// Decode through the given arch's parser and accumulate into a
+    /// `DecodedAssistantTurn` (or `DecodeFailure`). The accumulator
+    /// collapses text deltas into a single logical text and validates
+    /// the call event sequence — comparing accumulator outputs is
+    /// chunk-invariant where comparing raw `DecodeEvent` sequences is
+    /// not (because text-delta granularity legitimately varies with
+    /// chunk boundaries).
+    fn decode_through_arch(
+        arch: &str,
+        chunks: &[&str],
+    ) -> Result<crate::runtime::chat::DecodedAssistantTurn, crate::runtime::chat::wire::DecodeFailure>
+    {
+        use crate::runtime::chat::AssistantTurnAccumulator;
+        let cfg = ARCHES
+            .iter()
+            .find(|s| s.arch == arch)
+            .expect("arch in proptest pair must be in ARCHES")
+            .cfg();
+        let proto = tool_protocol_for(arch, &cfg).expect("registered");
+        let dir = directory_with_add();
+        let mut parser = proto.make_parser(dir);
+        let mut events = Vec::new();
+        for c in chunks {
+            events.extend(parser.feed(c));
+        }
+        events.extend(parser.finish(StopReason::EndOfText));
+        let mut acc = AssistantTurnAccumulator::new();
+        for ev in events {
+            acc.feed(ev)?;
+        }
+        acc.into_turn()
+    }
+
+    proptest! {
+        /// Two-way split at any byte offset must produce the same
+        /// settled `DecodedAssistantTurn` as feeding the input whole.
+        /// Runs over every registered (arch, input) pair.
+        #[test]
+        fn two_way_split_is_invariant(
+            (arch, input) in arch_and_input_strategy(),
+            split in 0_usize..400,
+        ) {
+            let split = split.min(input.len());
+            let mut s = split;
+            while s < input.len() && !input.is_char_boundary(s) {
+                s += 1;
+            }
+            let whole = format!("{:?}", decode_through_arch(arch, &[input]));
+            let chunked = format!("{:?}", decode_through_arch(arch, &[&input[..s], &input[s..]]));
+            prop_assert_eq!(whole, chunked, "[{}] two-way split at byte {} differed", arch, s);
+        }
+
+        /// N-way split at multiple boundaries: same invariant.
+        #[test]
+        fn n_way_split_is_invariant(
+            (arch, input) in arch_and_input_strategy(),
+            mut splits in prop::collection::vec(0_usize..400, 1..5),
+        ) {
+            splits.sort_unstable();
+            let mut clamped: Vec<usize> = Vec::with_capacity(splits.len());
+            for s in splits {
+                let mut s = s.min(input.len());
+                while s < input.len() && !input.is_char_boundary(s) {
+                    s += 1;
+                }
+                if clamped.last().copied().is_none_or(|prev| prev < s) {
+                    clamped.push(s);
+                }
+            }
+            let mut chunks: Vec<&str> = Vec::with_capacity(clamped.len() + 1);
+            let mut last = 0;
+            for s in &clamped {
+                chunks.push(&input[last..*s]);
+                last = *s;
+            }
+            chunks.push(&input[last..]);
+            let whole = format!("{:?}", decode_through_arch(arch, &[input]));
+            let chunked = format!("{:?}", decode_through_arch(arch, &chunks));
+            prop_assert_eq!(whole, chunked, "[{}] n-way split differed", arch);
+        }
+    }
 }
 
 pub fn last_stop_reason(events: &[DecodeEvent]) -> StopReason {

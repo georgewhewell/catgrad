@@ -144,4 +144,71 @@ mod tests {
             Err(ParserError::MissingField("name"))
         ));
     }
+
+    /// Decode through the codec, returning the single (name, args).
+    fn decode_one(payload: &str) -> (String, JsonValue) {
+        match XmlFunctionCodec.parse(payload) {
+            CodecOutcome::Calls(mut calls) => {
+                assert_eq!(calls.len(), 1, "expected one call");
+                let c = calls.remove(0);
+                (c.name, c.args)
+            }
+            other => panic!("expected Calls, got {other:?}"),
+        }
+    }
+
+    fn decode_err(payload: &str) -> ParserError {
+        match XmlFunctionCodec.parse(payload) {
+            CodecOutcome::Error(e) => e,
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn valid_call_with_multiple_parameters() {
+        let (name, args) = decode_one(
+            "<function=greet>\n<parameter=name>\"Alice\"</parameter>\n<parameter=times>3</parameter>\n</function>",
+        );
+        assert_eq!(name, "greet");
+        assert_eq!(args["name"], json!("Alice"));
+        assert_eq!(args["times"], json!(3));
+    }
+
+    #[test]
+    fn parameter_value_falls_back_to_bare_string() {
+        // Unquoted string value — should fall back to bare-string
+        // rather than raise a JSON parse error.
+        let (_, args) = decode_one(
+            "<function=op><parameter=mode>div</parameter></function>",
+        );
+        assert_eq!(args["mode"], json!("div"));
+    }
+
+    #[test]
+    fn empty_payload_rejected() {
+        assert!(matches!(decode_err(""), ParserError::Malformed(_)));
+        assert!(matches!(decode_err("   \n  "), ParserError::Malformed(_)));
+    }
+
+    #[test]
+    fn no_parameters_yields_empty_args() {
+        let (name, args) = decode_one("<function=do_thing></function>");
+        assert_eq!(name, "do_thing");
+        assert_eq!(args, json!({}));
+    }
+
+    #[test]
+    fn malformed_parameter_tag_rejected() {
+        // `<parameter=k` — no closing `>` of the parameter open tag.
+        let err = decode_err(
+            "<function=f><parameter=k</function>",
+        );
+        assert!(matches!(err, ParserError::Malformed(_)));
+    }
+
+    #[test]
+    fn missing_function_open_rejected() {
+        let err = decode_err("<parameter=k>v</parameter>");
+        assert!(matches!(err, ParserError::Malformed(m) if m.contains("<function=")));
+    }
 }

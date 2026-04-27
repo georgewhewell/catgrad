@@ -247,3 +247,59 @@ pub(crate) fn find_top_level_char(text: &str, needle: char) -> Option<usize> {
     .ok()
     .flatten()
 }
+
+#[cfg(test)]
+mod tests_codec {
+    use super::*;
+    use serde_json::json;
+
+    fn one(payload: &str) -> (String, JsonValue) {
+        match PythonicCallsCodec.parse(payload) {
+            CodecOutcome::Calls(mut c) => {
+                assert_eq!(c.len(), 1, "expected one call");
+                let dc = c.remove(0);
+                (dc.name, dc.args)
+            }
+            other => panic!("expected Calls, got {other:?}"),
+        }
+    }
+
+    fn err(payload: &str) -> ParserError {
+        match PythonicCallsCodec.parse(payload) {
+            CodecOutcome::Error(e) => e,
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn call_with_outer_list_parses() {
+        let (name, args) = one(r#"[calculator(lhs=1, rhs=2, op="div")]"#);
+        assert_eq!(name, "calculator");
+        assert_eq!(args["lhs"], json!(1));
+        assert_eq!(args["op"], json!("div"));
+    }
+
+    #[test]
+    fn call_without_outer_list_parses() {
+        let (name, args) = one("add(a=1, b=2)");
+        assert_eq!(name, "add");
+        assert_eq!(args, json!({"a": 1, "b": 2}));
+    }
+
+    #[test]
+    fn single_quoted_string_arg_parses() {
+        let (_, args) = one("op(mode='div')");
+        assert_eq!(args["mode"], json!("div"));
+    }
+
+    #[test]
+    fn empty_payload_rejected() {
+        assert!(matches!(err(""), ParserError::Malformed(_)));
+        assert!(matches!(err("   "), ParserError::Malformed(_)));
+    }
+
+    #[test]
+    fn empty_outer_list_rejected() {
+        assert!(matches!(err("[]"), ParserError::Malformed(m) if m.contains("contained no calls")));
+    }
+}

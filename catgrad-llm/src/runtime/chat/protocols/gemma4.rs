@@ -161,16 +161,6 @@ mod tests {
 
 
 
-    #[test]
-    fn missing_call_prefix_is_terminal() {
-        let mut p = make_parser(directory());
-        let events = run(
-            &mut *p,
-            &[r#"<|tool_call>calculator{lhs:1}<tool_call|>"#],
-        );
-        assert!(matches!(&events[0], DecodeEvent::ParseError { .. }));
-        assert_eq!(last_stop_reason(&events), StopReason::ProtocolError);
-    }
 
     #[test]
     fn unterminated_block_is_terminal() {
@@ -227,41 +217,7 @@ mod tests {
         assert_eq!(args["op"], "add");
     }
 
-    #[test]
-    fn multiple_calls_in_sequence() {
-        let mut p = make_parser(directory());
-        let events = run(
-            &mut *p,
-            &[
-                r#"<|tool_call>call:calculator{lhs:1,op:<|"|>add<|"|>,rhs:2}<tool_call|>"#,
-                r#"<|tool_call>call:calculator{lhs:3,op:<|"|>mul<|"|>,rhs:4}<tool_call|>"#,
-            ],
-        );
-        assert!(matches!(
-            &events[0],
-            DecodeEvent::ToolCallStart { index: 0, name } if name == "calculator"
-        ));
-        assert!(matches!(
-            &events[3],
-            DecodeEvent::ToolCallStart { index: 1, name } if name == "calculator"
-        ));
-        assert_eq!(last_stop_reason(&events), StopReason::EndOfText);
-    }
 
-    #[test]
-    fn empty_args_object_parses() {
-        // A tool with no required args could legitimately emit `{}`.
-        let nullary_tool = ToolSpec::new(
-            "ping",
-            None,
-            json!({ "type": "object", "properties": {} }),
-        );
-        let dir = Arc::new(ToolDirectory::new(vec![nullary_tool]).unwrap());
-        let mut p = make_parser(dir);
-        let events = run(&mut *p, &[r#"<|tool_call>call:ping{}<tool_call|>"#]);
-        assert!(matches!(&events[0], DecodeEvent::ToolCallStart { .. }));
-        assert_eq!(last_stop_reason(&events), StopReason::EndOfText);
-    }
 
     #[test]
     fn raw_text_resembling_call_without_sentinel_is_plain_text() {
@@ -307,208 +263,15 @@ mod tests {
         Arc::new(ToolDirectory::new(vec![search_tool()]).unwrap())
     }
 
-    /// Function names with `-` and `.` are common in real tool catalogs
-    /// (e.g. `tools.shell-exec`). vLLM accepts `[\w\-\.]+`; we match.
-    #[test]
-    fn function_name_with_dot_and_dash_accepted() {
-        let mut p = make_parser(search_directory());
-        let events = run(
-            &mut *p,
-            &[r#"<|tool_call>call:tools.shell-exec{cmd:<|"|>ls<|"|>}<tool_call|>"#],
-        );
-        assert!(matches!(
-            &events[0],
-            DecodeEvent::ToolCallStart { index: 0, name } if name == "tools.shell-exec"
-        ));
-        assert_eq!(last_stop_reason(&events), StopReason::EndOfText);
-    }
 
-    /// Function names that don't fit the documented charset (whitespace,
-    /// leading digit, etc.) are rejected loudly as protocol errors —
-    /// silently passing them through risks the executor blowing up on a
-    /// `tool_call` whose `function.name` it cannot dispatch.
-    #[test]
-    fn invalid_function_name_charset_is_rejected() {
-        let mut p = make_parser(directory());
-        let events = run(
-            &mut *p,
-            &[r#"<|tool_call>call:bad name{a:1}<tool_call|>"#],
-        );
-        let DecodeEvent::ParseError { source, .. } = &events[0] else {
-            panic!("expected ParseError, got {events:?}");
-        };
-        assert!(
-            source.to_string().contains("invalid function name"),
-            "got: {source}"
-        );
-    }
 
-    /// llama.cpp #21384 / #21316: braces inside a string value broke the
-    /// outer object's brace matcher. The fix is to skip over `<|"|>...
-    /// <|"|>` regions during depth counting — this test pins it.
-    #[test]
-    fn string_value_with_braces_is_opaque() {
-        let mut p = make_parser(search_directory());
-        let events = run(
-            &mut *p,
-            &[r#"<|tool_call>call:tools.shell-exec{cmd:<|"|>echo {hello, world}<|"|>}<tool_call|>"#],
-        );
-        let DecodeEvent::ToolCallEnd { args, .. } = events
-            .iter()
-            .find(|e| matches!(e, DecodeEvent::ToolCallEnd { .. }))
-            .expect("expected ToolCallEnd")
-        else {
-            unreachable!();
-        };
-        assert_eq!(args["cmd"], "echo {hello, world}");
-    }
 
-    /// Same defense as above for arrays inside strings — `[`/`]`
-    /// inside a `<|"|>...<|"|>` region must not flip array depth.
-    #[test]
-    fn string_value_with_brackets_is_opaque() {
-        let mut p = make_parser(search_directory());
-        let events = run(
-            &mut *p,
-            &[r#"<|tool_call>call:tools.shell-exec{cmd:<|"|>grep [abc] /etc/hosts<|"|>}<tool_call|>"#],
-        );
-        let DecodeEvent::ToolCallEnd { args, .. } = events
-            .iter()
-            .find(|e| matches!(e, DecodeEvent::ToolCallEnd { .. }))
-            .expect("expected ToolCallEnd")
-        else {
-            unreachable!();
-        };
-        assert_eq!(args["cmd"], "grep [abc] /etc/hosts");
-    }
 
-    /// Nested object arguments parse recursively. Keys remain bare at
-    /// every level (`escape_keys=False` propagates).
-    #[test]
-    fn nested_object_argument() {
-        let mut p = make_parser(search_directory());
-        let events = run(
-            &mut *p,
-            &[r#"<|tool_call>call:tools.shell-exec{cmd:<|"|>ls<|"|>,env:{HOME:<|"|>/root<|"|>,LANG:<|"|>C<|"|>}}<tool_call|>"#],
-        );
-        let DecodeEvent::ToolCallEnd { args, .. } = events
-            .iter()
-            .find(|e| matches!(e, DecodeEvent::ToolCallEnd { .. }))
-            .expect("expected ToolCallEnd")
-        else {
-            unreachable!();
-        };
-        assert_eq!(args["env"]["HOME"], "/root");
-        assert_eq!(args["env"]["LANG"], "C");
-    }
 
-    /// Array of strings — each element delimited by `<|"|>` and
-    /// separated at the top level of the array by `,`.
-    #[test]
-    fn array_of_strings_argument() {
-        let mut p = make_parser(search_directory());
-        let events = run(
-            &mut *p,
-            &[r#"<|tool_call>call:tools.shell-exec{cmd:<|"|>cargo<|"|>,args:[<|"|>build<|"|>,<|"|>--release<|"|>]}<tool_call|>"#],
-        );
-        let DecodeEvent::ToolCallEnd { args, .. } = events
-            .iter()
-            .find(|e| matches!(e, DecodeEvent::ToolCallEnd { .. }))
-            .expect("expected ToolCallEnd")
-        else {
-            unreachable!();
-        };
-        assert_eq!(args["args"][0], "build");
-        assert_eq!(args["args"][1], "--release");
-    }
 
-    /// Booleans arrive as bare `true` / `false`.
-    #[test]
-    fn boolean_argument() {
-        let mut p = make_parser(search_directory());
-        let events = run(
-            &mut *p,
-            &[r#"<|tool_call>call:tools.shell-exec{cmd:<|"|>ls<|"|>,dry_run:true}<tool_call|>"#],
-        );
-        let DecodeEvent::ToolCallEnd { args, .. } = events
-            .iter()
-            .find(|e| matches!(e, DecodeEvent::ToolCallEnd { .. }))
-            .expect("expected ToolCallEnd")
-        else {
-            unreachable!();
-        };
-        assert_eq!(args["dry_run"], true);
-    }
 
-    /// Negative integers and floats round-trip through `parse_number`.
-    #[test]
-    fn negative_and_float_numbers() {
-        let nums = ToolSpec::new(
-            "calc",
-            None,
-            json!({
-                "type": "object",
-                "properties": {
-                    "i": { "type": "integer" },
-                    "f": { "type": "number" },
-                },
-                "required": ["i", "f"],
-            }),
-        );
-        let dir = Arc::new(ToolDirectory::new(vec![nums]).unwrap());
-        let mut p = make_parser(dir);
-        let events = run(
-            &mut *p,
-            &[r#"<|tool_call>call:calc{f:-3.14,i:-42}<tool_call|>"#],
-        );
-        let DecodeEvent::ToolCallEnd { args, .. } = events
-            .iter()
-            .find(|e| matches!(e, DecodeEvent::ToolCallEnd { .. }))
-            .expect("expected ToolCallEnd")
-        else {
-            unreachable!();
-        };
-        assert_eq!(args["i"], -42);
-        let f = args["f"].as_f64().unwrap();
-        assert!((f - -3.14_f64).abs() < 1e-9, "got {f}");
-    }
 
-    /// HF discussions #20 / #55 on `google/gemma-4-*-it`: an outdated
-    /// chat-template revision emitted `<|tool_call>{{...}}<tool_call|>`
-    /// — JSON-shaped, not bare-key-form. Reject loudly with a hint
-    /// pointing to the upstream issue rather than silently misparsing.
-    #[test]
-    fn outdated_double_braced_template_is_rejected_with_hint() {
-        let mut p = make_parser(directory());
-        let events = run(
-            &mut *p,
-            &[r#"<|tool_call>{{"name":"calculator","arguments":{"lhs":1,"op":"add","rhs":2}}}<tool_call|>"#],
-        );
-        let DecodeEvent::ParseError { source, .. } = &events[0] else {
-            panic!("expected ParseError, got {events:?}");
-        };
-        let msg = source.to_string();
-        assert!(
-            msg.contains("double-braced") || msg.contains("outdated"),
-            "expected hint about outdated template, got: {msg}"
-        );
-    }
 
-    /// Trailing whitespace between `}` and `<tool_call|>` is tolerated.
-    /// Some chat-template revisions add a stray newline before the
-    /// close sentinel.
-    #[test]
-    fn trailing_whitespace_in_body_tolerated() {
-        let mut p = make_parser(directory());
-        let events = run(
-            &mut *p,
-            &[
-                "<|tool_call>call:calculator{lhs:1,op:<|\"|>add<|\"|>,rhs:2}\n<tool_call|>",
-            ],
-        );
-        assert!(matches!(&events[0], DecodeEvent::ToolCallStart { .. }));
-        assert_eq!(last_stop_reason(&events), StopReason::EndOfText);
-    }
 
     /// Args arrive in any order — the chat template uses `dictsort` so
     /// alphabetical is the canonical wire form, but the parser itself
@@ -591,57 +354,5 @@ mod tests {
             }
         }
         assert_eq!(text, "first  middle  last");
-    }
-}
-
-#[cfg(test)]
-mod proptests {
-    use super::*;
-    use crate::runtime::chat::protocols::test_util;
-    use proptest::prelude::*;
-
-    fn interesting_inputs() -> Vec<&'static str> {
-        vec![
-            "hello world",
-            r#"<|tool_call>call:add{a:1,b:2}<tool_call|>"#,
-            r#"prefix <|tool_call>call:add{a:1,b:2}<tool_call|> suffix"#,
-            r#"<|tool_call>call:add{a:1,b:2}<tool_call|><|tool_call>call:add{a:3,b:4}<tool_call|>"#,
-            "the docs say <|tool_call> but it's just text",
-            r#"<|tool_call>call:missing{}<tool_call|>"#,
-            r#"<|tool_call>call:add{a:1,b:2}<tool_call|> done"#,
-            // Strings with internal braces / brackets — must remain
-            // opaque under any chunk boundary.
-            r#"<|tool_call>call:add{a:<|"|>{not real}<|"|>,b:2}<tool_call|>"#,
-            // Outdated chat-template payload (HF discussions #20/#55):
-            // chunk-invariance still holds — same DecodeFailure either way.
-            r#"<|tool_call>{{"name":"add","arguments":{"a":1,"b":2}}}<tool_call|>"#,
-        ]
-    }
-
-    proptest! {
-        #[test]
-        fn two_way_split_is_invariant(
-            input_idx in 0_usize..9,
-            split in 0_usize..200,
-        ) {
-            let inputs = interesting_inputs();
-            let text = inputs[input_idx];
-            let whole = test_util::decode_whole(make_parser, text);
-            let chunked = test_util::decode_chunked(make_parser, text, &[split]);
-            prop_assert_eq!(format!("{:?}", whole), format!("{:?}", chunked));
-        }
-
-        #[test]
-        fn n_way_split_is_invariant(
-            input_idx in 0_usize..9,
-            mut splits in prop::collection::vec(0_usize..200, 1..5),
-        ) {
-            let inputs = interesting_inputs();
-            let text = inputs[input_idx];
-            splits.sort_unstable();
-            let whole = test_util::decode_whole(make_parser, text);
-            let chunked = test_util::decode_chunked(make_parser, text, &splits);
-            prop_assert_eq!(format!("{:?}", whole), format!("{:?}", chunked));
-        }
     }
 }

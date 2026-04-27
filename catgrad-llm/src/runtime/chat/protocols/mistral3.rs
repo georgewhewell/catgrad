@@ -144,58 +144,8 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn valid_multiple_calls_in_one_block() {
-        let mut p = make_parser(directory_with_add());
-        let events = run(
-            &mut *p,
-            &[
-                r#"[TOOL_CALLS] [{"name":"add","arguments":{"a":1,"b":2}},{"name":"add","arguments":{"a":3,"b":4}}]"#,
-            ],
-        );
-        // Two triples + Stop = 7 events
-        assert_eq!(events.len(), 7);
-        assert!(matches!(
-            &events[0],
-            DecodeEvent::ToolCallStart { index: 0, name } if name == "add"
-        ));
-        assert!(matches!(
-            &events[3],
-            DecodeEvent::ToolCallStart { index: 1, name } if name == "add"
-        ));
-        assert_eq!(last_stop_reason(&events), StopReason::EndOfText);
-    }
 
-    #[test]
-    fn text_before_sentinel_emits_as_text() {
-        let mut p = make_parser(directory_with_add());
-        let events = run(
-            &mut *p,
-            &[r#"prefix [TOOL_CALLS] [{"name":"add","arguments":{"a":1,"b":2}}]"#],
-        );
-        assert!(matches!(
-            &events[0],
-            DecodeEvent::TextDelta(s) if s == "prefix "
-        ));
-        assert!(matches!(&events[1], DecodeEvent::ToolCallStart { .. }));
-        assert!(matches!(&events[2], DecodeEvent::ToolCallArgsDelta { .. }));
-        assert!(matches!(&events[3], DecodeEvent::ToolCallEnd { .. }));
-        assert_eq!(last_stop_reason(&events), StopReason::EndOfText);
-    }
 
-    #[test]
-    fn bare_object_payload() {
-        // Real model output sometimes drops the outer brackets; vLLM
-        // accepts that and so do we.
-        let mut p = make_parser(directory_with_add());
-        let events = run(
-            &mut *p,
-            &[r#"[TOOL_CALLS] {"name":"add","arguments":{"a":1,"b":2}}"#],
-        );
-        assert_eq!(events.len(), 4);
-        assert!(matches!(&events[0], DecodeEvent::ToolCallStart { .. }));
-        assert_eq!(last_stop_reason(&events), StopReason::EndOfText);
-    }
 
     #[test]
     fn no_space_after_sentinel_is_accepted() {
@@ -211,68 +161,13 @@ mod tests {
         assert_eq!(last_stop_reason(&events), StopReason::EndOfText);
     }
 
-    #[test]
-    fn id_field_is_ignored() {
-        // The official template emits `{"name": ..., "arguments": ...,
-        // "id": "9-char"}` — extra fields don't disturb us.
-        let mut p = make_parser(directory_with_add());
-        let events = run(
-            &mut *p,
-            &[
-                r#"[TOOL_CALLS] [{"name":"add","arguments":{"a":1,"b":2},"id":"abc123xyz"}]"#,
-            ],
-        );
-        assert_eq!(events.len(), 4);
-        assert!(matches!(&events[0], DecodeEvent::ToolCallStart { .. }));
-        assert_eq!(last_stop_reason(&events), StopReason::EndOfText);
-    }
-
-    #[test]
-    fn parameters_alias_is_accepted() {
-        let mut p = make_parser(directory_with_add());
-        let events = run(
-            &mut *p,
-            &[r#"[TOOL_CALLS] [{"name":"add","parameters":{"a":1,"b":2}}]"#],
-        );
-        assert_eq!(events.len(), 4);
-        assert!(matches!(&events[0], DecodeEvent::ToolCallStart { .. }));
-        assert_eq!(last_stop_reason(&events), StopReason::EndOfText);
-    }
-
-    #[test]
-    fn arguments_as_json_encoded_string_is_accepted() {
-        // OpenAI-legacy shape: `arguments` is a JSON-encoded string.
-        let mut p = make_parser(directory_with_add());
-        let events = run(
-            &mut *p,
-            &[r#"[TOOL_CALLS] [{"name":"add","arguments":"{\"a\":1,\"b\":2}"}]"#],
-        );
-        assert_eq!(events.len(), 4);
-        let DecodeEvent::ToolCallEnd { args, .. } = &events[2] else {
-            panic!("expected ToolCallEnd, got {:?}", events[2]);
-        };
-        assert_eq!(args, &json!({"a": 1, "b": 2}));
-    }
 
 
 
 
-    #[test]
-    fn empty_payload_is_terminal() {
-        // Just `[TOOL_CALLS]` with nothing after.
-        let mut p = make_parser(directory_with_add());
-        let events = run(&mut *p, &["[TOOL_CALLS]"]);
-        assert!(matches!(&events[0], DecodeEvent::ParseError { .. }));
-        assert_eq!(last_stop_reason(&events), StopReason::ProtocolError);
-    }
 
-    #[test]
-    fn empty_array_payload_is_terminal() {
-        let mut p = make_parser(directory_with_add());
-        let events = run(&mut *p, &["[TOOL_CALLS] []"]);
-        assert!(matches!(&events[0], DecodeEvent::ParseError { .. }));
-        assert_eq!(last_stop_reason(&events), StopReason::ProtocolError);
-    }
+
+
 
     #[test]
     fn raw_json_without_sentinel_is_plain_text() {
@@ -386,85 +281,6 @@ mod tests {
         assert_eq!(last_stop_reason(&events), StopReason::ProtocolError);
     }
 
-    #[test]
-    fn missing_name_field_is_terminal() {
-        let mut p = make_parser(directory_with_add());
-        let events = run(&mut *p, &[r#"[TOOL_CALLS] [{"arguments":{}}]"#]);
-        assert!(matches!(&events[0], DecodeEvent::ParseError { .. }));
-        assert_eq!(last_stop_reason(&events), StopReason::ProtocolError);
-    }
 
-    #[test]
-    fn arguments_not_object_is_terminal() {
-        let mut p = make_parser(directory_with_add());
-        let events = run(
-            &mut *p,
-            &[r#"[TOOL_CALLS] [{"name":"add","arguments":42}]"#],
-        );
-        assert!(matches!(&events[0], DecodeEvent::ParseError { .. }));
-        assert_eq!(last_stop_reason(&events), StopReason::ProtocolError);
-    }
 
-}
-
-#[cfg(test)]
-mod proptests {
-    //! Chunk-invariance: feeding the same model output as one string
-    //! versus split across arbitrary boundaries produces the same final
-    //! decoded turn (or the same DecodeFailure).
-
-    use super::*;
-    use crate::runtime::chat::protocols::test_util;
-    use proptest::prelude::*;
-
-    fn interesting_inputs() -> Vec<&'static str> {
-        vec![
-            // plain text
-            "hello world",
-            // single valid call (with leading space — Mistral 7B form)
-            r#"[TOOL_CALLS] [{"name":"add","arguments":{"a":1,"b":2}}]"#,
-            // single valid call (no space — Ministral form)
-            r#"[TOOL_CALLS][{"name":"add","arguments":{"a":1,"b":2}}]"#,
-            // bare object
-            r#"[TOOL_CALLS] {"name":"add","arguments":{"a":1,"b":2}}"#,
-            // call with `id` field (real Mistral output)
-            r#"[TOOL_CALLS] [{"name":"add","arguments":{"a":1,"b":2},"id":"abc123xyz"}]"#,
-            // two calls in one block
-            r#"[TOOL_CALLS] [{"name":"add","arguments":{"a":1,"b":2}},{"name":"add","arguments":{"a":3,"b":4}}]"#,
-            // call with prefix text
-            r#"prefix text [TOOL_CALLS] [{"name":"add","arguments":{"a":1,"b":2}}]"#,
-            // sentinel-shaped text that isn't a sentinel
-            "the docs say [TOOL but it's just text",
-            // unknown tool — produces a fatal event; chunk-invariance
-            // still holds.
-            r#"[TOOL_CALLS] [{"name":"missing","arguments":{}}]"#,
-        ]
-    }
-
-    proptest! {
-        #[test]
-        fn two_way_split_is_invariant(
-            input_idx in 0_usize..9,
-            split in 0_usize..200,
-        ) {
-            let inputs = interesting_inputs();
-            let text = inputs[input_idx];
-            let whole = test_util::decode_whole(make_parser, text);
-            let chunked = test_util::decode_chunked(make_parser, text, &[split]);
-            prop_assert_eq!(format!("{:?}", whole), format!("{:?}", chunked));
-        }
-
-        #[test]
-        fn n_way_split_is_invariant(
-            input_idx in 0_usize..9,
-            mut splits in prop::collection::vec(0_usize..200, 1..5),
-        ) {
-            let inputs = interesting_inputs();
-            let text = inputs[input_idx];
-            splits.sort_unstable();
-            let whole = test_util::decode_whole(make_parser, text);
-            let chunked = test_util::decode_chunked(make_parser, text, &splits);
-            prop_assert_eq!(format!("{:?}", whole), format!("{:?}", chunked));
-        }
-    }
 }

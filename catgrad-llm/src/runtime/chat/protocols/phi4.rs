@@ -141,59 +141,11 @@ mod tests {
         assert_eq!(last_stop_reason(&events), StopReason::EndOfText);
     }
 
-    #[test]
-    fn valid_multiple_calls_in_one_block() {
-        let mut p = make_parser(directory_with_add_and_mul());
-        let events = run(
-            &mut *p,
-            &[
-                r#"functools[{"name":"add","arguments":{"a":1,"b":2}},{"name":"mul","arguments":{"a":3,"b":4}}]"#,
-            ],
-        );
-        // Two triples + Stop = 7 events.
-        assert_eq!(events.len(), 7);
-        assert!(matches!(
-            &events[0],
-            DecodeEvent::ToolCallStart { index: 0, name } if name == "add"
-        ));
-        assert!(matches!(
-            &events[3],
-            DecodeEvent::ToolCallStart { index: 1, name } if name == "mul"
-        ));
-        assert_eq!(last_stop_reason(&events), StopReason::EndOfText);
-    }
-
-    #[test]
-    fn text_before_sentinel_emits_as_text() {
-        let mut p = make_parser(directory_with_add());
-        let events = run(
-            &mut *p,
-            &[r#"sure, calling tool: functools[{"name":"add","arguments":{"a":1,"b":2}}]"#],
-        );
-        // TextDelta("sure, calling tool: "), Start, ArgsDelta, End, Stop
-        assert_eq!(events.len(), 5);
-        assert!(matches!(
-            &events[0],
-            DecodeEvent::TextDelta(s) if s == "sure, calling tool: "
-        ));
-        assert!(matches!(&events[1], DecodeEvent::ToolCallStart { .. }));
-        assert_eq!(last_stop_reason(&events), StopReason::EndOfText);
-    }
 
 
 
 
-    #[test]
-    fn empty_payload_is_terminal() {
-        // Just `functools` with no JSON before EOS.
-        let mut p = make_parser(directory_with_add());
-        let events = run(&mut *p, &["functools"]);
-        let DecodeEvent::ParseError { source, .. } = &events[0] else {
-            panic!("expected ParseError, got {events:?}");
-        };
-        assert!(matches!(source, ParserError::Malformed(_)));
-        assert_eq!(last_stop_reason(&events), StopReason::ProtocolError);
-    }
+
 
     #[test]
     fn raw_json_without_sentinel_is_plain_text() {
@@ -268,84 +220,6 @@ mod tests {
         assert_eq!(last_stop_reason(&events), StopReason::ProtocolError);
     }
 
-    #[test]
-    fn bare_object_payload_accepted() {
-        // A single call without the surrounding `[]`.
-        let mut p = make_parser(directory_with_add());
-        let events = run(
-            &mut *p,
-            &[r#"functools{"name":"add","arguments":{"a":1,"b":2}}"#],
-        );
-        assert!(matches!(&events[0], DecodeEvent::ToolCallStart { .. }));
-        assert_eq!(last_stop_reason(&events), StopReason::EndOfText);
-    }
 
-    #[test]
-    fn parameters_key_accepted_as_arguments() {
-        let mut p = make_parser(directory_with_add());
-        let events = run(
-            &mut *p,
-            &[r#"functools[{"name":"add","parameters":{"a":1,"b":2}}]"#],
-        );
-        assert!(matches!(&events[0], DecodeEvent::ToolCallStart { .. }));
-        assert_eq!(last_stop_reason(&events), StopReason::EndOfText);
-    }
 
-}
-
-#[cfg(test)]
-mod proptests {
-    //! Chunk-invariance: feeding the same model output as one string
-    //! versus split across arbitrary boundaries produces the same
-    //! final decoded turn (or the same DecodeFailure).
-
-    use super::*;
-    use crate::runtime::chat::protocols::test_util;
-    use proptest::prelude::*;
-
-    fn interesting_inputs() -> Vec<&'static str> {
-        vec![
-            // plain text
-            "hello world",
-            // single valid call
-            r#"functools[{"name":"add","arguments":{"a":1,"b":2}}]"#,
-            // call with text prefix
-            r#"sure: functools[{"name":"add","arguments":{"a":1,"b":2}}]"#,
-            // bare-object payload
-            r#"functools{"name":"add","arguments":{"a":1,"b":2}}"#,
-            // two calls in one block
-            r#"functools[{"name":"add","arguments":{"a":1,"b":2}},{"name":"add","arguments":{"a":3,"b":4}}]"#,
-            // sentinel-shaped text that isn't the sentinel
-            "the docs say functo... but it's just text",
-            // unknown tool — chunk-invariance still holds (same fatal either way)
-            r#"functools[{"name":"missing","arguments":{}}]"#,
-        ]
-    }
-
-    proptest! {
-        #[test]
-        fn two_way_split_is_invariant(
-            input_idx in 0_usize..7,
-            split in 0_usize..200,
-        ) {
-            let inputs = interesting_inputs();
-            let text = inputs[input_idx];
-            let whole = test_util::decode_whole(make_parser, text);
-            let chunked = test_util::decode_chunked(make_parser, text, &[split]);
-            prop_assert_eq!(format!("{:?}", whole), format!("{:?}", chunked));
-        }
-
-        #[test]
-        fn n_way_split_is_invariant(
-            input_idx in 0_usize..7,
-            mut splits in prop::collection::vec(0_usize..200, 1..5),
-        ) {
-            let inputs = interesting_inputs();
-            let text = inputs[input_idx];
-            splits.sort_unstable();
-            let whole = test_util::decode_whole(make_parser, text);
-            let chunked = test_util::decode_chunked(make_parser, text, &splits);
-            prop_assert_eq!(format!("{:?}", whole), format!("{:?}", chunked));
-        }
-    }
 }
