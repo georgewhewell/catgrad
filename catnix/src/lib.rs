@@ -11,6 +11,7 @@ const SOURCE_OUTPUT_SCHEMA: &str = "catnix.source.output.v1";
 const TOKEN_IDS_SCHEMA: &str = "catnix.token_ids.v1";
 const TEXT_POLICY_SCHEMA: &str = "catnix.text.policy.v1";
 const TEXT_EXECUTION_SCHEMA: &str = "catnix.text.execution.v1";
+const TEXT_STATE_SCHEMA: &str = "catnix.text.state.v1";
 const TEXT_ARTIFACT_IDENTITY_SCHEMA: &str = "catnix.text.artifact.identity.v1";
 const TEXT_ARTIFACT_OUTPUT_SCHEMA: &str = "catnix.text.artifact.output.v1";
 
@@ -230,9 +231,6 @@ impl<I: InputAddressed> SourceRef<I> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BoundTerm;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TextState;
-
 pub type BoundTermId = OutputId<BoundTerm>;
 pub type TokenIdsId = OutputId<TokenIds>;
 pub type TextPolicyId = OutputId<TextPolicy>;
@@ -409,6 +407,31 @@ impl Canonical for TextPolicy {
 }
 
 impl OutputAddressed for TextPolicy {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TextState {
+    tokens: TokenIdsId,
+}
+
+impl TextState {
+    pub const fn new(tokens: TokenIdsId) -> Self {
+        Self { tokens }
+    }
+
+    pub const fn tokens(&self) -> TokenIdsId {
+        self.tokens
+    }
+}
+
+impl Canonical for TextState {
+    fn encode(&self, encoder: &mut DagCborEncoder) {
+        encoder.array(2);
+        encoder.str(TEXT_STATE_SCHEMA);
+        encoder.bytes(self.tokens.as_bytes());
+    }
+}
+
+impl OutputAddressed for TextState {}
 
 pub type TextSource = SourceRef<TextExecution>;
 
@@ -650,6 +673,17 @@ mod tests {
     }
 
     #[test]
+    fn text_state_is_output_addressed_by_token_artifact() {
+        let a = TextState::new(TokenIds::from([1, 2, 3]).output_id());
+        let b = TextState::new(TokenIds::from([1, 2, 3]).output_id());
+        let c = TextState::new(TokenIds::from([1, 2, 4]).output_id());
+
+        assert_eq!(a.tokens(), b.tokens());
+        assert_eq!(a.output_id(), b.output_id());
+        assert_ne!(a.output_id(), c.output_id());
+    }
+
+    #[test]
     fn identity_is_output_addressed_genesis() {
         let identity = TextArtifact::identity(output_id::<BoundTerm>(7));
         let prompt_tokens = TokenIds::from([1]).output_id();
@@ -692,13 +726,13 @@ mod tests {
         let a = TextArtifact::output(
             execution,
             5,
-            output_id::<TextState>(8),
+            TextState::new(TokenIds::from([1]).output_id()).output_id(),
             TokenIds::from([1]).output_id(),
         );
         let b = TextArtifact::output(
             execution,
             5,
-            output_id::<TextState>(8),
+            TextState::new(TokenIds::from([1]).output_id()).output_id(),
             TokenIds::from([2]).output_id(),
         );
 
