@@ -220,7 +220,7 @@ impl<I: InputAddressed> SourceRef<I> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct BoundProgram;
+pub struct BoundTerm;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Tensor;
@@ -343,16 +343,16 @@ impl InputAddressed for TextExecution {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextIdentity {
-    bound_program: OutputId<BoundProgram>,
+    bound_term: OutputId<BoundTerm>,
 }
 
 impl TextIdentity {
-    pub const fn new(bound_program: OutputId<BoundProgram>) -> Self {
-        Self { bound_program }
+    pub const fn new(bound_term: OutputId<BoundTerm>) -> Self {
+        Self { bound_term }
     }
 
-    pub const fn bound_program(&self) -> OutputId<BoundProgram> {
-        self.bound_program
+    pub const fn bound_term(&self) -> OutputId<BoundTerm> {
+        self.bound_term
     }
 }
 
@@ -408,7 +408,7 @@ impl Canonical for TextArtifact {
             Self::Identity(identity) => {
                 encoder.array(2);
                 encoder.str(TEXT_ARTIFACT_IDENTITY_SCHEMA);
-                encoder.bytes(identity.bound_program.as_bytes());
+                encoder.bytes(identity.bound_term.as_bytes());
             }
             Self::Output(output) => {
                 encoder.array(5);
@@ -493,7 +493,7 @@ impl Default for DagCborEncoder {
 #[cfg(test)]
 mod tests {
     use super::{
-        BoundProgram, InputAddressed, OutputAddressed, OutputId, SourceRef, StateBundle, Tensor,
+        BoundTerm, InputAddressed, OutputAddressed, OutputId, SourceRef, StateBundle, Tensor,
         TextArtifact, TextExecution, TextIdentity, TextInput, TextOutput, TextPolicy,
     };
 
@@ -511,7 +511,7 @@ mod tests {
 
     #[test]
     fn identity_is_output_addressed_genesis() {
-        let identity = TextArtifact::Identity(TextIdentity::new(output_id::<BoundProgram>(7)));
+        let identity = TextArtifact::Identity(TextIdentity::new(output_id::<BoundTerm>(7)));
         let input = TextInput::new(output_id::<Tensor>(1)).output_id();
         let policy = TextPolicy::new(4, vec![]).output_id();
         let execution = TextExecution::new(SourceRef::Output(identity.output_id()), input, policy);
@@ -524,7 +524,7 @@ mod tests {
 
     #[test]
     fn execution_input_id_changes_when_source_changes() {
-        let identity = TextArtifact::Identity(TextIdentity::new(output_id::<BoundProgram>(7)));
+        let identity = TextArtifact::Identity(TextIdentity::new(output_id::<BoundTerm>(7)));
         let input = TextInput::new(output_id::<Tensor>(1)).output_id();
         let policy = TextPolicy::new(4, vec![]).output_id();
         let first = TextExecution::new(SourceRef::Output(identity.output_id()), input, policy);
@@ -537,7 +537,7 @@ mod tests {
     fn output_artifact_id_changes_when_tokens_change() {
         let execution = TextExecution::new(
             SourceRef::Output(
-                TextArtifact::Identity(TextIdentity::new(output_id::<BoundProgram>(7))).output_id(),
+                TextArtifact::Identity(TextIdentity::new(output_id::<BoundTerm>(7))).output_id(),
             ),
             TextInput::new(output_id::<Tensor>(1)).output_id(),
             TextPolicy::new(4, vec![]).output_id(),

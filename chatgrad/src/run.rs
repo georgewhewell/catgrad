@@ -13,10 +13,11 @@ use crate::types;
 use crate::{PreparedPrompt, RenderChatTemplateOptions};
 use catgrad::interpreter::backend::candle::CandleBackend;
 use catgrad::interpreter::{self, Backend};
-use catgrad::prelude::{Dtype, Shape, TypedTerm, stdlib, to_load_ops};
-use catgrad_llm::helpers::LLMModel;
+use catgrad::prelude::{Dtype, Shape};
+use catgrad::runtime::BoundTerm;
 use catgrad_llm::utils::*;
 use catgrad_llm::{Detokenizer, LLMError, Result};
+use catgrad_llm_models::helpers::LLMModel;
 use catgrad_llm_models::utils::{
     PreparedImageInput, PreparedMultimodalInput, get_model, interpolate_multimodal_prompt,
     split_placeholder_tokens,
@@ -30,7 +31,6 @@ use url::Url;
 struct ModelEngineInner {
     backend: CandleBackend,
     parameter_values: interpreter::Parameters<CandleBackend>,
-    parameter_types: catgrad::typecheck::Parameters,
     config_json: serde_json::Value,
     tokenizer: Tokenizer,
     chat_template: String,
@@ -80,8 +80,7 @@ pub struct ModelEngine {
 // Internal per-request decode state. A fresh runner is created for each generation call.
 struct ModelRunner {
     model: Box<dyn LLMModel>,
-    typed_term: TypedTerm,
-    interpreter: interpreter::Interpreter<CandleBackend>,
+    bound: BoundTerm<CandleBackend>,
     state_cache: Vec<interpreter::Value<CandleBackend>>,
     multimodal: Option<MultimodalState>,
     max_sequence_length: usize,
@@ -142,7 +141,7 @@ impl ModelEngine {
     /// The cache does not persist across separate generation calls.
     pub fn new(model_name: &str, use_kv_cache: bool, dtype: Dtype) -> Result<Self> {
         let backend = CandleBackend::new();
-        let (parameter_values, parameter_types, config_json, tokenizer, tokenizer_config, _) =
+        let (parameter_values, _parameter_types, config_json, tokenizer, tokenizer_config, _) =
             load_model(model_name, "main", &backend, dtype)?;
         let model = get_model(&config_json, 1, None, dtype)?;
         let chat_template = get_model_chat_template(model_name, "main")?;
@@ -152,7 +151,6 @@ impl ModelEngine {
             inner: Rc::new(ModelEngineInner {
                 backend,
                 parameter_values,
-                parameter_types,
                 config_json,
                 tokenizer,
                 chat_template,
@@ -380,7 +378,6 @@ impl ModelRunner {
     ) -> Result<Self> {
         let backend = engine.inner.backend.clone();
         let parameter_values = engine.inner.parameter_values.clone();
-        let parameter_types = engine.inner.parameter_types.clone();
         let model = get_model(
             &engine.inner.config_json,
             max_sequence_length,
@@ -402,25 +399,26 @@ impl ModelRunner {
                 LLMError::InvalidModelConfig("Failed to create typed term".to_string())
             })?
         };
-        let mut env = stdlib();
         let load_prefix = if prepared.multimodal.image.is_some() {
             catgrad::prelude::Path::empty()
         } else {
             model.path()
         };
-        env.declarations
-            .extend(to_load_ops(load_prefix, parameter_types.keys()));
-        let interpreter = interpreter::Interpreter::new(backend.clone(), env, parameter_values);
+        let bound = BoundTerm::new(typed_term, &backend, &parameter_values, load_prefix)
+            .map_err(|err| LLMError::InvalidModelConfig(err.to_string()))?;
         let state_cache = empty_state_cache(&backend, model.as_ref())?;
         let multimodal = match prepared.multimodal.image.as_ref() {
-            Some(image) => Some(build_multimodal_state(model.as_ref(), &interpreter, image)?),
+            Some(image) => Some(build_multimodal_state(
+                model.as_ref(),
+                bound.interpreter(),
+                image,
+            )?),
             None => None,
         };
 
         Ok(Self {
             model,
-            typed_term,
-            interpreter,
+            bound,
             state_cache,
             multimodal,
             max_sequence_length,
@@ -441,15 +439,15 @@ impl ModelRunner {
             } else {
                 (&[][..], tokens)
             };
-            inputs.push(token_tensor(&self.interpreter, text_before_tokens)?);
+            inputs.push(token_tensor(self.bound.interpreter(), text_before_tokens)?);
             inputs.push(if multimodal.use_image_embeddings {
                 multimodal.visual_embeddings.clone()
             } else {
                 multimodal.empty_image_embeddings.clone()
             });
-            inputs.push(token_tensor(&self.interpreter, text_after_tokens)?);
+            inputs.push(token_tensor(self.bound.interpreter(), text_after_tokens)?);
         } else {
-            inputs.push(token_tensor(&self.interpreter, tokens)?);
+            inputs.push(token_tensor(self.bound.interpreter(), tokens)?);
         }
         inputs.extend(self.state_cache.iter().cloned());
         inputs.push(interpreter::Value::Nat(self.max_sequence_length));
@@ -457,12 +455,9 @@ impl ModelRunner {
             inputs.push(interpreter::Value::Nat(extra_nat));
         }
 
-        let mut results = self
-            .interpreter
-            .run(self.typed_term.term.clone(), inputs)
-            .map_err(|err| {
-                LLMError::InvalidModelConfig(format!("Failed to run inference: {err}"))
-            })?;
+        let mut results = self.bound.run(inputs).map_err(|err| {
+            LLMError::InvalidModelConfig(format!("Failed to run inference: {err}"))
+        })?;
         if results.is_empty() {
             return Err(LLMError::InvalidModelConfig(
                 "model returned no outputs".to_string(),
@@ -476,7 +471,7 @@ impl ModelRunner {
         };
         let output = results.remove(0);
         let token = match output {
-            interpreter::Value::Tensor(arr) => match self.interpreter.backend.to_vec(arr) {
+            interpreter::Value::Tensor(arr) => match self.bound.interpreter().backend.to_vec(arr) {
                 interpreter::TaggedVec::U32(v) => v.last().copied().ok_or_else(|| {
                     LLMError::InvalidModelConfig("token output tensor was empty".to_string())
                 })?,
