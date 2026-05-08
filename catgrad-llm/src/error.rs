@@ -34,7 +34,7 @@ pub enum LLMError {
     HuggingFaceAPIError(#[from] hf_hub::api::sync::ApiError),
 
     #[error("Template rendering error: {0}")]
-    TemplateError(#[from] minijinja::Error),
+    TemplateError(String),
 
     #[error("Unsupported template feature: {0}")]
     UnsupportedTemplateFeature(String),

@@ -461,11 +461,10 @@ name = "catgrad-llm"
 version = "0.2.1"
 dependencies = [
  "anyhow",
- "axum",
  "candle-core",
  "catgrad",
  "catgrad-llm-models",
- "chrono",
+ "chatgrad",
  "clap",
  "env_logger",
  "float8",
@@ -477,7 +476,6 @@ dependencies = [
  "log",
  "memmap2",
  "minijinja",
- "minijinja-contrib",
  "open-hypergraphs",
  "open-hypergraphs-dot",
  "rayon",
@@ -486,16 +484,10 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_path_to_error",
- "serde_with",
  "test-log",
  "thiserror 2.0.17",
  "tokenizers",
- "tokio",
- "tokio-stream",
  "toml",
- "typed-builder",
- "ureq",
- "url",
 ]
 
 [[package]]
@@ -534,6 +526,34 @@ name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
+
+[[package]]
+name = "chatgrad"
+version = "0.2.1"
+dependencies = [
+ "anyhow",
+ "axum",
+ "catgrad",
+ "catgrad-llm",
+ "catgrad-llm-models",
+ "chrono",
+ "clap",
+ "env_logger",
+ "log",
+ "minijinja",
+ "minijinja-contrib",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "test-log",
+ "tokenizers",
+ "tokio",
+ "tokio-stream",
+ "toml",
+ "typed-builder",
+ "ureq",
+ "url",
+]
 
 [[package]]
 name = "chrono"

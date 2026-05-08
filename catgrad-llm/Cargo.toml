@@ -15,11 +15,7 @@ open-hypergraphs = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true , features=["preserve_order"]}
 tokenizers = { workspace = true }
-
-# TODO: remove these?
 hf-hub = { version = "0.4.3", default-features = false, features = ["ureq"] }
-minijinja = { version = "2.11.0", features = ["json", "preserve_order"] }
-minijinja-contrib = { version = "2.11.0", features = ["pycompat"] }
 memmap2 = { workspace = true }
 safetensors = {workspace = true}
 candle-core = "0.10.1"
@@ -29,12 +25,7 @@ float8 = { workspace = true }
 thiserror = "2.0"
 rayon = "1.11.0"
 image = "0.25.6"
-chrono = "0.4.41"
-typed-builder = "0.23"
-serde_with = { version = "3.17", default-features = false, features = ["macros"] }
 serde_path_to_error = "0.1"
-ureq = "2.12.1"
-url = "2.5.7"
 hound = "3.5.1"
 rustfft = "6.4.1"
 
@@ -47,7 +38,6 @@ open-hypergraphs-dot = "0.2.4"
 env_logger = "0.11"
 test-log = "0.2.17"
 catgrad = {path = "../catgrad", features=["ndarray-backend", "candle-backend", "svg", "serde"]}
+chatgrad = {path = "../chatgrad"}
 anyhow = "1.0.99"
-axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
-tokio = { version = "1", default-features = false, features = ["rt", "macros", "net", "sync"] }
-tokio-stream = { version = "0.1", default-features = false }
+minijinja = { version = "2.11.0", features = ["json", "preserve_order"] }

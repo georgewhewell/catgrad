@@ -13,9 +13,6 @@ pub use rope::*;
 mod approx;
 pub use approx::*;
 
-mod tool_calls;
-pub use tool_calls::*;
-
 mod module;
 pub use module::*;
 

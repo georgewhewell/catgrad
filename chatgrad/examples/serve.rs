@@ -24,10 +24,10 @@ use serde_json::json;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
-use catgrad_llm::api::{self, ApiContext, EndpointResult};
-use catgrad_llm::run::ModelEngine;
-use catgrad_llm::types::{anthropic, openai};
 use catgrad_llm::{LLMError, Result as LlmResult};
+use chatgrad::api::{self, ApiContext, EndpointResult};
+use chatgrad::run::ModelEngine;
+use chatgrad::types::{anthropic, openai};
 
 #[derive(Parser, Debug)]
 struct Args {

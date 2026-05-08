@@ -1,0 +1,35 @@
+[package]
+name = "chatgrad"
+description = "Chat protocols, prompt rendering, and tool-call dispatch over catgrad-llm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+documentation.workspace = true
+
+[dependencies]
+catgrad = { version = "0.2.1", path = "../catgrad", features = ["candle-backend"] }
+catgrad-llm = { version = "0.2.1", path = "../catgrad-llm" }
+catgrad-llm-models = { version = "0.2.1", path = "../catgrad-llm-models" }
+serde = { workspace = true }
+serde_json = { workspace = true, features = ["preserve_order"] }
+serde_with = { version = "3.17", default-features = false, features = ["macros"] }
+typed-builder = "0.23"
+tokenizers = { workspace = true }
+minijinja = { version = "2.11.0", features = ["json", "preserve_order"] }
+minijinja-contrib = { version = "2.11.0", features = ["pycompat"] }
+chrono = "0.4.41"
+ureq = "2.12.1"
+url = "2.5.7"
+
+[dev-dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
+clap = { workspace = true }
+toml = "0.8"
+env_logger = "0.11"
+test-log = "0.2.17"
+anyhow = "1.0.99"
+log = "0.4.27"
+tokio = { version = "1", default-features = false, features = ["rt", "macros", "net", "sync"] }
+tokio-stream = { version = "0.1", default-features = false }

@@ -1,5 +1,5 @@
 //! Anthropic Messages API wire format.
-use crate::LLMError;
+use catgrad_llm::LLMError;
 use serde::{Deserialize, Serialize};
 use serde_with::skip_serializing_none;
 use typed_builder::TypedBuilder;

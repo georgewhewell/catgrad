@@ -1,5 +1,10 @@
-use crate::{Result, types};
+use crate::types;
+use catgrad_llm::{LLMError, Result};
 use catgrad_llm_models::utils::PreparedMultimodalInput;
+
+fn template_err(err: minijinja::Error) -> LLMError {
+    LLMError::TemplateError(err.to_string())
+}
 use chrono::Local;
 use minijinja::{Environment, Error, ErrorKind, State, Value, context};
 use minijinja_contrib::pycompat::unknown_method_callback;
@@ -157,22 +162,25 @@ fn render_chat_messages(
     let mut env = Environment::new();
     env.set_unknown_method_callback(template_unknown_method_callback);
     env.add_function("strftime_now", strftime_now);
-    env.add_template("chat", chat_template)?;
-    let tmpl = env.get_template("chat")?;
+    env.add_template("chat", chat_template)
+        .map_err(template_err)?;
+    let tmpl = env.get_template("chat").map_err(template_err)?;
     let bos_token = tokenizer_config
         .get("bos_token")
         .and_then(JsonValue::as_str)
         .unwrap_or("");
-    let prompt = tmpl.render(context!(
-        messages => messages,
-        tools => options
-            .tools
-            .map(Value::from_serialize)
-            .unwrap_or(Value::UNDEFINED),
-        add_generation_prompt => true,
-        enable_thinking => options.thinking.enables_template_thinking(),
-        bos_token => bos_token
-    ))?;
+    let prompt = tmpl
+        .render(context!(
+            messages => messages,
+            tools => options
+                .tools
+                .map(Value::from_serialize)
+                .unwrap_or(Value::UNDEFINED),
+            add_generation_prompt => true,
+            enable_thinking => options.thinking.enables_template_thinking(),
+            bos_token => bos_token
+        ))
+        .map_err(template_err)?;
 
     Ok(prompt)
 }
@@ -363,7 +371,7 @@ mod tests {
         env.get_template("test")
             .unwrap()
             .render(context!(message => context))
-            .map_err(Into::into)
+            .map_err(template_err)
     }
 
     #[test]

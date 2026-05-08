@@ -8,13 +8,15 @@
 //! [`ModelEngine::generate_from_prepared`] call creates a fresh internal runner, so KV-cache state,
 //! token position, and generated text do not leak across requests. If you want prior conversation
 //! to influence generation, include that history in the prepared prompt or message list.
-use crate::helpers::LLMModel;
+use crate::prompt::render_chat_prompt_with_options;
 use crate::types;
-use crate::utils::*;
-use crate::{Detokenizer, LLMError, PreparedPrompt, Result};
+use crate::{PreparedPrompt, RenderChatTemplateOptions};
 use catgrad::interpreter::backend::candle::CandleBackend;
 use catgrad::interpreter::{self, Backend};
 use catgrad::prelude::{Dtype, Shape, TypedTerm, stdlib, to_load_ops};
+use catgrad_llm::helpers::LLMModel;
+use catgrad_llm::utils::*;
+use catgrad_llm::{Detokenizer, LLMError, Result};
 use catgrad_llm_models::utils::{
     PreparedImageInput, PreparedMultimodalInput, get_model, interpolate_multimodal_prompt,
     split_placeholder_tokens,
@@ -48,9 +50,9 @@ struct ModelEngineInner {
 /// # Example
 ///
 /// ```no_run
-/// use catgrad_llm::run::ModelEngine;
-/// use catgrad_llm::types::Message;
-/// use catgrad_llm::types::openai::ChatMessage;
+/// use chatgrad::run::ModelEngine;
+/// use chatgrad::types::Message;
+/// use chatgrad::types::openai::ChatMessage;
 ///
 /// let engine = ModelEngine::new("Qwen/Qwen3-0.6B", true, catgrad::prelude::Dtype::F32)?;
 ///
