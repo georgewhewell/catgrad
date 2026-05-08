@@ -1,4 +1,4 @@
-use crate::{LLMError, Result};
+use catgrad_llm::{LLMError, Result};
 use serde_json::{Map, Value, json};
 
 #[derive(Clone, Debug)]
@@ -60,6 +60,28 @@ pub fn parse_lfm2_tool_calls(output: &str) -> Result<Option<ToolUseStep>> {
 
 pub fn parse_olmo3_tool_calls(output: &str) -> Result<Option<ToolUseStep>> {
     parse_python_tool_calls(output, "<function_calls>", "</function_calls>")
+}
+
+/// Dispatch tool-call parsing by HuggingFace architecture string.
+///
+/// Replaces the per-model `LLMModel::parse_tool_calls` override that
+/// lived in catgrad-llm before chatgrad existed. Architectures with no
+/// known tool-call protocol return `Ok(None)`.
+pub fn parse_for_architecture(architecture: &str, output: &str) -> Result<Option<ToolUseStep>> {
+    match architecture {
+        "Olmo2ForCausalLM" | "Olmo3ForCausalLM" | "OlmoHybridForCausalLM" => {
+            parse_olmo3_tool_calls(output)
+        }
+        "Qwen3ForCausalLM" | "Qwen3MoeForCausalLM" => parse_qwen3_tool_calls(output),
+        "Qwen3_5ForConditionalGeneration" | "Qwen3_5MoeForConditionalGeneration" => {
+            parse_qwen3_5_tool_calls(output)
+        }
+        "Lfm2ForCausalLM" | "Lfm2VlForConditionalGeneration" => parse_lfm2_tool_calls(output),
+        "GraniteForCausalLM" | "GraniteMoeForCausalLM" | "GraniteMoeHybridForCausalLM" => {
+            parse_granite_tool_calls(output)
+        }
+        _ => Ok(None),
+    }
 }
 
 fn build_tool_use_step<'a, F>(

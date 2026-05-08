@@ -10,9 +10,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 use catgrad_llm::LLMError;
-use catgrad_llm::run::ModelEngine;
-use catgrad_llm::types::{anthropic, openai, plain};
 use catgrad_llm::utils::from_json_slice;
+use chatgrad::run::ModelEngine;
+use chatgrad::types::{anthropic, openai, plain};
 
 // Known limitations of this demo server:
 // - User-provided stop strings are ignored; only model-native EOS stopping is supported.

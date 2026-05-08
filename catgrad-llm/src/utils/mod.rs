@@ -15,12 +15,6 @@ use crate::{LLMError, Result};
 mod detokenize;
 pub use detokenize::{Detokenizer, detokenize_tokens};
 
-mod prompt;
-pub(crate) use prompt::render_chat_prompt_with_options;
-pub use prompt::{
-    PreparedPrompt, RenderChatTemplateOptions, render_chat_template, render_chat_template_values,
-};
-
 mod images;
 pub(crate) use images::convert_image_to_patches;
 pub use images::*;

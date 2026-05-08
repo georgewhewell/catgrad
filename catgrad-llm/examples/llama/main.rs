@@ -2,9 +2,11 @@ use anyhow::Result;
 use catgrad::interpreter::backend::candle::CandleBackend;
 use catgrad::interpreter::backend::ndarray::NdArrayBackend;
 use catgrad::prelude::*;
-use catgrad_llm::helpers::{LLMModel, ToolCall, ToolUseStep};
+use catgrad_llm::helpers::LLMModel;
 use catgrad_llm::models;
 use catgrad_llm::utils::*;
+use chatgrad::prompt::{render_chat_template_values, RenderChatTemplateOptions};
+use chatgrad::tool_calls::{ToolCall, ToolUseStep};
 use clap::{Parser, ValueEnum};
 use minijinja::{Value, context};
 use serde::Deserialize;
@@ -625,7 +627,10 @@ fn run_with_backend<B: interpreter::Backend>(
                 multimodal_ctx: None,
             },
         )?;
-        if let Some(tool_use_step) = model.parse_tool_calls(&first_text)? {
+        let architecture = get_model_architecture(&config_json)?;
+        if let Some(tool_use_step) =
+            chatgrad::tool_calls::parse_for_architecture(architecture, &first_text)?
+        {
             let mut tool_responses = Vec::with_capacity(tool_use_step.tool_calls.len());
             for tool_call in &tool_use_step.tool_calls {
                 let tool_response = tools::execute_tool_call(tool_call)?;

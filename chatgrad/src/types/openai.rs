@@ -1,5 +1,5 @@
 //! OpenAI chat-completions wire format.
-use crate::LLMError;
+use catgrad_llm::LLMError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use serde_with::skip_serializing_none;

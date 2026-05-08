@@ -86,9 +86,6 @@ impl LLMModel for Qwen3Model {
         self.dtype
     }
 
-    fn parse_tool_calls(&self, output: &str) -> crate::Result<Option<ToolUseStep>> {
-        parse_qwen3_tool_calls(output)
-    }
 }
 
 impl Qwen3Model {

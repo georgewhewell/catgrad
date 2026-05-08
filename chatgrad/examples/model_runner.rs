@@ -1,7 +1,7 @@
 use catgrad::prelude::Dtype;
-use catgrad_llm::run::ModelEngine;
-use catgrad_llm::types::Message;
-use catgrad_llm::types::openai::ChatMessage;
+use chatgrad::run::ModelEngine;
+use chatgrad::types::Message;
+use chatgrad::types::openai::ChatMessage;
 use std::io::Write;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

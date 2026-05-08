@@ -83,9 +83,6 @@ impl LLMModel for GraniteModel {
         self.dtype
     }
 
-    fn parse_tool_calls(&self, output: &str) -> crate::Result<Option<ToolUseStep>> {
-        parse_granite_tool_calls(output)
-    }
 }
 
 impl GraniteModel {
