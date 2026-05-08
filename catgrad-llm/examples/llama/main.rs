@@ -2,10 +2,11 @@ use anyhow::Result;
 use catgrad::interpreter::backend::candle::CandleBackend;
 use catgrad::interpreter::backend::ndarray::NdArrayBackend;
 use catgrad::prelude::*;
+use catgrad::runtime::BoundTerm;
 use catgrad_llm::helpers::LLMModel;
 use catgrad_llm::models;
 use catgrad_llm::utils::*;
-use chatgrad::prompt::{render_chat_template_values, RenderChatTemplateOptions};
+use chatgrad::prompt::{RenderChatTemplateOptions, render_chat_template_values};
 use chatgrad::tool_calls::{ToolCall, ToolUseStep};
 use clap::{Parser, ValueEnum};
 use minijinja::{Value, context};
@@ -514,14 +515,15 @@ fn run_with_backend<B: interpreter::Backend>(
         model.path()
     };
     env.declarations
-        .extend(to_load_ops(load_prefix, parameter_types.keys()));
+        .extend(to_load_ops(load_prefix.clone(), parameter_types.keys()));
 
     // Shapecheck the model
     if args.typecheck {
         typecheck::check(&env, &parameter_types, typed_term.clone()).map_err(anyhow::Error::new)?;
     }
 
-    let interpreter = interpreter::Interpreter::new(backend, env, parameter_values);
+    let bound = BoundTerm::new(typed_term, &backend, &parameter_values, load_prefix)?;
+    let interpreter = bound.interpreter();
 
     let mut multimodal_ctx: Option<MultimodalRuntime<B>> = None;
     if let Some(mm) = mm_metadata {
@@ -563,7 +565,13 @@ fn run_with_backend<B: interpreter::Backend>(
                 let encoder_term = encoder_model
                     .term()
                     .ok_or_else(|| anyhow::anyhow!("failed to build multimodal encoder term"))?;
-                let results = interpreter.run(encoder_term.term, vec![image_tensor])?;
+                let encoder = BoundTerm::new(
+                    encoder_term,
+                    &backend,
+                    &parameter_values,
+                    catgrad::prelude::Path::empty(),
+                )?;
+                let results = encoder.run(vec![image_tensor])?;
                 let embeddings = results
                     .first()
                     .cloned()
@@ -594,7 +602,13 @@ fn run_with_backend<B: interpreter::Backend>(
             let encoder_term = encoder_model
                 .term()
                 .ok_or_else(|| anyhow::anyhow!("failed to build multimodal encoder term"))?;
-            let results = interpreter.run(encoder_term.term, vec![audio_tensor, mask_tensor])?;
+            let encoder = BoundTerm::new(
+                encoder_term,
+                &backend,
+                &parameter_values,
+                catgrad::prelude::Path::empty(),
+            )?;
+            let results = encoder.run(vec![audio_tensor, mask_tensor])?;
             results
                 .first()
                 .cloned()
@@ -611,8 +625,7 @@ fn run_with_backend<B: interpreter::Backend>(
     if args.tool_use {
         let (first_text, first_tokens, first_elapsed_pp, first_elapsed_gen) = generate_stream(
             model.as_ref(),
-            &typed_term,
-            &interpreter,
+            &bound,
             &tokenizer,
             token_ids,
             GenerationConfig {
@@ -656,8 +669,7 @@ fn run_with_backend<B: interpreter::Backend>(
                 .to_vec();
             let (_, second_tokens, second_elapsed_pp, second_elapsed_gen) = generate_stream(
                 model.as_ref(),
-                &typed_term,
-                &interpreter,
+                &bound,
                 &tokenizer,
                 follow_up_ids,
                 GenerationConfig {
@@ -694,8 +706,7 @@ fn run_with_backend<B: interpreter::Backend>(
     } else {
         let (_, generated_tokens, elapsed_pp, elapsed_gen) = generate_stream(
             model.as_ref(),
-            &typed_term,
-            &interpreter,
+            &bound,
             &tokenizer,
             token_ids,
             GenerationConfig {
@@ -780,14 +791,13 @@ struct GenerationConfig<'a, B: interpreter::Backend> {
 
 fn generate_stream<B: interpreter::Backend>(
     model: &dyn LLMModel,
-    typed_term: &TypedTerm,
-    interpreter: &interpreter::Interpreter<B>,
+    bound: &BoundTerm<B>,
     tokenizer: &tokenizers::Tokenizer,
     mut token_ids: Vec<u32>,
     config: GenerationConfig<'_, B>,
 ) -> Result<(String, usize, std::time::Duration, std::time::Duration)> {
     let eos_token_ids = model.config().get_eos_token_ids();
-    let mut state_cache = empty_state_cache(&interpreter.backend, model)?;
+    let mut state_cache = empty_state_cache(&bound.interpreter().backend, model)?;
     let mut use_modality_embeddings = config.multimodal_ctx.is_some();
     let mut output = String::new();
     let mut generated_tokens = 0;
@@ -810,8 +820,7 @@ fn generate_stream<B: interpreter::Backend>(
         };
         let (next_token_id, updated_state_cache) = run_interpreter(
             model,
-            typed_term,
-            interpreter,
+            bound,
             decode_inputs,
             &state_cache,
             config.max_sequence_length,
@@ -859,12 +868,12 @@ fn token_tensor<B: interpreter::Backend>(
 
 fn run_interpreter<B: interpreter::Backend>(
     model: &dyn LLMModel,
-    typed_term: &TypedTerm,
-    interpreter: &interpreter::Interpreter<B>,
+    bound: &BoundTerm<B>,
     decode_inputs: DecodeInputs<'_, B>,
     state_cache: &[interpreter::Value<B>],
     max_sequence_length: usize,
 ) -> Result<(u32, Vec<interpreter::Value<B>>)> {
+    let interpreter = bound.interpreter();
     let mut inputs = Vec::with_capacity(state_cache.len() + 4);
     let input_seq_len;
 
@@ -918,9 +927,7 @@ fn run_interpreter<B: interpreter::Backend>(
     }
 
     // Run the model
-    let mut results = interpreter
-        .run(typed_term.term.clone(), inputs)
-        .expect("Failed to run inference");
+    let mut results = bound.run(inputs).expect("Failed to run inference");
 
     if results.is_empty() {
         return Err(anyhow::anyhow!("model returned no outputs"));

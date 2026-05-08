@@ -1,5 +1,6 @@
 use catgrad::prelude::ops::*;
 use catgrad::prelude::*;
+use catgrad::runtime::BoundTerm;
 
 use std::collections::BTreeMap;
 
@@ -32,7 +33,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let backend = select_backend()?;
 
     // Run the interpreter with the selected backend
-    let results = run_interpreter(&backend, &typed_term, env)?;
+    let results = run_interpreter(&backend, typed_term, model.path())?;
 
     // Print the `Value`s returned by the interpreter.
     for value in results {
@@ -44,8 +45,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn run_interpreter<B: interpreter::Backend>(
     backend: &B,
-    typed_term: &TypedTerm,
-    env: Environment,
+    typed_term: TypedTerm,
+    load_prefix: Path,
 ) -> Result<Vec<interpreter::Value<B>>, Box<dyn std::error::Error>> {
     // Create sample input data: batch of 2 MNIST-like images (28x28)
     let input_data: Vec<f32> = (0..2 * 28 * 28)
@@ -53,18 +54,16 @@ fn run_interpreter<B: interpreter::Backend>(
         .collect();
 
     let interpreter_params = load_param_data(backend);
-    let interpreter = interpreter::Interpreter::new(backend.clone(), env, interpreter_params);
+    let bound = BoundTerm::new(typed_term, backend, &interpreter_params, load_prefix)?;
 
     let input_tensor = interpreter::tensor(
-        &interpreter.backend,
+        &bound.interpreter().backend,
         interpreter::Shape(vec![2, 28, 28]),
         input_data,
     )
     .expect("Failed to create input tensor");
 
-    let results = interpreter
-        .run(typed_term.term.clone(), vec![input_tensor])
-        .expect("Failed to run inference");
+    let results = bound.run(vec![input_tensor])?;
 
     Ok(results)
 }

@@ -13,6 +13,9 @@ pub mod interpreter;
 pub mod ssa;
 pub mod typecheck;
 
+// Runtime: BoundTerm
+pub mod runtime;
+
 // general compiler tools
 pub mod abstract_interpreter;
 pub mod definition;

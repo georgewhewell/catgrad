@@ -1,8 +1,9 @@
 use anyhow::Result;
 use catgrad::interpreter::backend::candle::CandleBackend;
-use catgrad::interpreter::{self, Backend, Interpreter};
+use catgrad::interpreter::{self, Backend};
 use catgrad::prelude::ops::*;
 use catgrad::prelude::*;
+use catgrad::runtime::BoundTerm;
 use catgrad::stdlib::nn::*;
 use catgrad::typecheck::TypeExpr;
 use catgrad_llm::helpers::*;
@@ -523,20 +524,15 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let typed_term = model.term().expect("failed to build model term");
 
-    let mut env = catgrad::stdlib::stdlib();
-    let param_keys: Vec<Path> = parameters.0.keys().cloned().collect();
-    env.declarations
-        .extend(catgrad::stdlib::to_load_ops(Path::empty(), &param_keys));
+    let bound = BoundTerm::new(typed_term, &backend, &parameters, Path::empty())?;
 
-    let interp = Interpreter::new(backend, env, parameters);
-
-    let results = interp.run(typed_term.term, vec![input_tensor, image_tensor])?;
+    let results = bound.run(vec![input_tensor, image_tensor])?;
     let result_tensor = match &results[1] {
         interpreter::Value::Tensor(t) => t,
         _ => panic!("Expected tensor output"),
     };
 
-    let vec_res = interp.backend.to_vec(result_tensor.clone());
+    let vec_res = bound.interpreter().backend.to_vec(result_tensor.clone());
 
     let probs = match vec_res {
         interpreter::TaggedVec::F32(v) => v,
