@@ -1,6 +1,6 @@
 //! Transport-agnostic API serving helpers built on top of [`crate::run::ModelEngine`].
 use crate::Result;
-use crate::run::ModelEngine;
+use crate::run::{GenerationControl, ModelEngine};
 use crate::types::{anthropic, openai};
 use serde_json::{Value, json};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -106,7 +106,7 @@ where
                 .build(),
         )?;
 
-        let generated = engine.generate_from_prepared(&prepared, max_tokens, |delta| {
+        let generated = engine.generate_text_from_prepared(&prepared, max_tokens, |delta| {
             on_chunk(
                 openai::ChatCompletionChunk::builder()
                     .id(id.clone())
@@ -123,7 +123,8 @@ where
                             .build(),
                     ])
                     .build(),
-            )
+            )?;
+            Ok(GenerationControl::Continue)
         })?;
 
         on_chunk(
@@ -136,7 +137,7 @@ where
                     openai::ChatStreamChoice::builder()
                         .index(0)
                         .delta(openai::ChatDelta::default())
-                        .finish_reason(Some(generated.termination.into()))
+                        .finish_reason(Some(generated.termination().into()))
                         .build(),
                 ])
                 .build(),
@@ -156,8 +157,8 @@ where
                     .model(model)
                     .choices(vec![])
                     .usage(Some(openai::Usage::from_counts(
-                        generated.prompt_tokens,
-                        generated.completion_tokens,
+                        generated.prompt_tokens(),
+                        generated.completion_tokens(),
                     )))
                     .build(),
             )?;
@@ -166,7 +167,8 @@ where
         return Ok(EndpointResult::Streamed);
     }
 
-    let generated = engine.generate_from_prepared(&prepared, max_tokens, |_| Ok(()))?;
+    let generated = engine
+        .generate_text_from_prepared(&prepared, max_tokens, |_| Ok(GenerationControl::Continue))?;
     Ok(EndpointResult::Json(
         openai::ChatCompletionResponse::builder()
             .id(next_id("chatcmpl"))
@@ -176,13 +178,13 @@ where
             .choices(vec![
                 openai::ChatChoice::builder()
                     .index(0)
-                    .message(openai::ChatMessage::assistant(generated.text))
-                    .finish_reason(Some(generated.termination.into()))
+                    .message(openai::ChatMessage::assistant(generated.text.clone()))
+                    .finish_reason(Some(generated.termination().into()))
                     .build(),
             ])
             .usage(Some(openai::Usage::from_counts(
-                generated.prompt_tokens,
-                generated.completion_tokens,
+                generated.prompt_tokens(),
+                generated.completion_tokens(),
             )))
             .build(),
     ))
@@ -256,7 +258,7 @@ where
         sequence_number += 1;
 
         let mut text = String::new();
-        let generated = engine.generate_from_prepared(&prepared, max_tokens, |delta| {
+        let generated = engine.generate_text_from_prepared(&prepared, max_tokens, |delta| {
             text.push_str(delta);
             on_event(openai::responses::ResponseStreamEvent::OutputTextDelta {
                 sequence_number,
@@ -266,7 +268,7 @@ where
                 delta: delta.to_string(),
             })?;
             sequence_number += 1;
-            Ok(())
+            Ok(GenerationControl::Continue)
         })?;
 
         on_event(openai::responses::ResponseStreamEvent::OutputTextDone {
@@ -309,8 +311,8 @@ where
                 openai::responses::ResponseStatus::Completed,
                 vec![completed_item],
                 Some(openai::responses::ResponseUsage::from_counts(
-                    generated.prompt_tokens,
-                    generated.completion_tokens,
+                    generated.prompt_tokens(),
+                    generated.completion_tokens(),
                 )),
             ),
         })?;
@@ -318,7 +320,8 @@ where
         return Ok(EndpointResult::Streamed);
     }
 
-    let generated = engine.generate_from_prepared(&prepared, max_tokens, |_| Ok(()))?;
+    let generated = engine
+        .generate_text_from_prepared(&prepared, max_tokens, |_| Ok(GenerationControl::Continue))?;
     Ok(EndpointResult::Json(build_openai_response(
         &next_id("resp"),
         now_unix(),
@@ -327,11 +330,11 @@ where
         vec![build_openai_response_message(
             &next_id("msg"),
             openai::responses::ResponseStatus::Completed,
-            vec![build_openai_response_text(generated.text)],
+            vec![build_openai_response_text(generated.text.clone())],
         )],
         Some(openai::responses::ResponseUsage::from_counts(
-            generated.prompt_tokens,
-            generated.completion_tokens,
+            generated.prompt_tokens(),
+            generated.completion_tokens(),
         )),
     )))
 }
@@ -376,17 +379,19 @@ where
             },
         })?;
 
-        let generated = engine.generate_from_prepared(&prepared, request.max_tokens, |delta| {
-            on_event(NamedEvent {
-                event: "content_block_delta",
-                payload: anthropic::MessageStreamEvent::ContentBlockDelta {
-                    index: 0,
-                    delta: anthropic::ContentBlockDelta::TextDelta {
-                        text: delta.to_string(),
+        let generated =
+            engine.generate_text_from_prepared(&prepared, request.max_tokens, |delta| {
+                on_event(NamedEvent {
+                    event: "content_block_delta",
+                    payload: anthropic::MessageStreamEvent::ContentBlockDelta {
+                        index: 0,
+                        delta: anthropic::ContentBlockDelta::TextDelta {
+                            text: delta.to_string(),
+                        },
                     },
-                },
-            })
-        })?;
+                })?;
+                Ok(GenerationControl::Continue)
+            })?;
 
         on_event(NamedEvent {
             event: "content_block_stop",
@@ -396,11 +401,11 @@ where
             event: "message_delta",
             payload: anthropic::MessageStreamEvent::MessageDelta {
                 delta: anthropic::StreamMessageDelta {
-                    stop_reason: Some(generated.termination.into()),
+                    stop_reason: Some(generated.termination().into()),
                 },
                 usage: anthropic::AnthropicUsage::new(
-                    generated.prompt_tokens,
-                    generated.completion_tokens,
+                    generated.prompt_tokens(),
+                    generated.completion_tokens(),
                 ),
             },
         })?;
@@ -412,20 +417,22 @@ where
         return Ok(EndpointResult::Streamed);
     }
 
-    let generated = engine.generate_from_prepared(&prepared, request.max_tokens, |_| Ok(()))?;
+    let generated = engine.generate_text_from_prepared(&prepared, request.max_tokens, |_| {
+        Ok(GenerationControl::Continue)
+    })?;
     Ok(EndpointResult::Json(
         anthropic::MessageResponse::builder()
             .id(next_id("msg"))
             .message_type(Some("message".to_string()))
             .role("assistant".to_string())
             .content(vec![anthropic::ContentBlock::Text {
-                text: generated.text,
+                text: generated.text.clone(),
             }])
             .model(model)
-            .stop_reason(Some(generated.termination.into()))
+            .stop_reason(Some(generated.termination().into()))
             .usage(anthropic::AnthropicUsage::new(
-                generated.prompt_tokens,
-                generated.completion_tokens,
+                generated.prompt_tokens(),
+                generated.completion_tokens(),
             ))
             .build(),
     ))

@@ -927,7 +927,9 @@ fn generate_stream<B: interpreter::Backend>(
             start_gen = std::time::Instant::now();
         }
         generated_tokens += 1;
-        if eos_token_ids.contains(&(next_token_id as i32)) && !config.benchmarking {
+        let next_token_id_i32 = i32::try_from(next_token_id)
+            .map_err(|_| anyhow::anyhow!("generated token id {next_token_id} exceeds i32 range"))?;
+        if eos_token_ids.contains(&next_token_id_i32) && !config.benchmarking {
             break;
         }
         if config.use_kv_cache {
