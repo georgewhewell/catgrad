@@ -5,8 +5,8 @@
 //! multiple requests on the same thread.
 //!
 //! Request-local execution state does not live in the engine. Each
-//! [`ModelEngine::generate_from_prepared`] call creates a fresh internal runner, so KV-cache state,
-//! token position, and generated text do not leak across requests. If you want prior conversation
+//! [`ModelEngine::generate_tokens_from_prepared`] call creates a fresh internal runner, so KV-cache
+//! state, token position, and generated text do not leak across requests. If you want prior conversation
 //! to influence generation, include that history in the prepared prompt or message list.
 use crate::prompt::render_chat_prompt_with_options;
 use crate::types;
@@ -56,16 +56,20 @@ struct ModelEngineInner {
 ///     Message::openai(ChatMessage::system("You are concise.")),
 ///     Message::openai(ChatMessage::user("What is 2+2?")),
 /// ])?;
-/// let first = engine.generate_from_prepared(&prompt, 64, |_| Ok(()))?;
+/// let first = engine.generate_tokens_from_prepared(&prompt, 64, |_| {
+///     Ok(chatgrad::run::GenerationControl::Continue)
+/// })?;
 ///
 /// let prompt = engine.prepare_messages(&[
 ///     Message::openai(ChatMessage::system("You are concise.")),
 ///     Message::openai(ChatMessage::user("What is 4+4?")),
 /// ])?;
-/// let second = engine.generate_from_prepared(&prompt, 64, |_| Ok(()))?;
+/// let second = engine.generate_tokens_from_prepared(&prompt, 64, |_| {
+///     Ok(chatgrad::run::GenerationControl::Continue)
+/// })?;
 ///
-/// assert!(first.completion_tokens <= 64);
-/// assert!(second.completion_tokens <= 64);
+/// assert!(first.completion_tokens() <= 64);
+/// assert!(second.completion_tokens() <= 64);
 /// # Ok::<_, catgrad_llm::LLMError>(())
 /// ```
 #[derive(Clone)]
@@ -91,16 +95,55 @@ struct MultimodalState {
     use_image_embeddings: bool,
 }
 
-/// Final text and token counts from a local generation.
+/// Final token output from a local generation.
 pub struct GenerationOutput {
-    /// Fully decoded generated text.
-    pub text: String,
     /// Number of prompt tokens fed into the model.
     pub prompt_tokens: u32,
-    /// Number of new tokens produced during generation.
-    pub completion_tokens: u32,
+    /// Accepted output token IDs. Stop/EOS tokens are not included.
+    pub output_tokens: Vec<u32>,
     /// Why generation stopped.
     pub termination: GenerationTermination,
+}
+
+impl GenerationOutput {
+    pub fn completion_tokens(&self) -> u32 {
+        u32::try_from(self.output_tokens.len()).unwrap_or(u32::MAX)
+    }
+}
+
+/// Text view over a token generation.
+pub struct TextGenerationOutput {
+    pub text: String,
+    pub tokens: GenerationOutput,
+}
+
+impl TextGenerationOutput {
+    pub fn prompt_tokens(&self) -> u32 {
+        self.tokens.prompt_tokens
+    }
+
+    pub fn completion_tokens(&self) -> u32 {
+        self.tokens.completion_tokens()
+    }
+
+    pub fn termination(&self) -> GenerationTermination {
+        self.tokens.termination
+    }
+}
+
+/// Per-token callback payload for local generation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GeneratedToken {
+    /// 1-based position in the accepted output token stream.
+    pub position: u32,
+    pub token_id: u32,
+}
+
+/// Callback decision after an accepted token or decoded text delta.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GenerationControl {
+    Continue,
+    Cancel,
 }
 
 /// Why local generation stopped.
@@ -110,6 +153,8 @@ pub enum GenerationTermination {
     Stop,
     /// Generation stopped because the requested token budget was exhausted.
     MaxTokens,
+    /// Generation stopped because the caller requested cancellation.
+    Cancelled,
 }
 
 impl From<GenerationTermination> for types::openai::FinishReason {
@@ -117,6 +162,7 @@ impl From<GenerationTermination> for types::openai::FinishReason {
         match value {
             GenerationTermination::Stop => Self::Stop,
             GenerationTermination::MaxTokens => Self::Length,
+            GenerationTermination::Cancelled => Self::Stop,
         }
     }
 }
@@ -126,6 +172,7 @@ impl From<GenerationTermination> for types::anthropic::StopReason {
         match value {
             GenerationTermination::Stop => Self::EndTurn,
             GenerationTermination::MaxTokens => Self::MaxTokens,
+            GenerationTermination::Cancelled => Self::EndTurn,
         }
     }
 }
@@ -136,11 +183,38 @@ impl ModelEngine {
     /// Set `use_kv_cache` to reuse KV-cache state between decode steps within a single request.
     /// The cache does not persist across separate generation calls.
     pub fn new(model_name: &str, use_kv_cache: bool, dtype: Dtype) -> Result<Self> {
-        let backend = CandleBackend::new();
+        Self::new_with_revision(model_name, "main", use_kv_cache, dtype)
+    }
+
+    /// Loads model weights, tokenizer, and chat template from a specific
+    /// Hugging Face revision.
+    pub fn new_with_revision(
+        model_name: &str,
+        revision: &str,
+        use_kv_cache: bool,
+        dtype: Dtype,
+    ) -> Result<Self> {
+        Self::new_with_backend(
+            model_name,
+            revision,
+            CandleBackend::new(),
+            use_kv_cache,
+            dtype,
+        )
+    }
+
+    /// Loads model assets using a caller-provided backend.
+    pub fn new_with_backend(
+        model_name: &str,
+        revision: &str,
+        backend: CandleBackend,
+        use_kv_cache: bool,
+        dtype: Dtype,
+    ) -> Result<Self> {
         let (parameter_values, _parameter_types, config_json, tokenizer, tokenizer_config, _) =
-            load_model(model_name, "main", &backend, dtype)?;
+            load_model(model_name, revision, &backend, dtype)?;
         let model = get_model(&config_json, 1, None, dtype)?;
-        let chat_template = get_model_chat_template(model_name, "main")?;
+        let chat_template = get_model_chat_template(model_name, revision)?;
         let eos_token_ids = model.config().get_eos_token_ids();
 
         Ok(Self {
@@ -242,44 +316,48 @@ impl ModelEngine {
         PreparedPrompt::from_prompt(&self.inner.tokenizer, prompt, &self.inner.eos_token_ids)
     }
 
-    /// Runs greedy local generation from a prepared prompt and streams text deltas.
+    /// Runs greedy local generation from a prepared prompt and streams accepted token IDs.
     ///
     /// Each call creates a fresh internal runner, so generation state does not persist between
     /// calls. Reuse the same engine for many requests; encode request-specific history in
     /// `prepared`.
-    pub fn generate_from_prepared<F>(
+    pub fn generate_tokens_from_prepared<F>(
         &self,
         prepared: &PreparedPrompt,
         max_tokens: u32,
-        mut on_text_delta: F,
+        mut on_token: F,
     ) -> Result<GenerationOutput>
     where
-        F: FnMut(&str) -> Result<()>,
+        F: FnMut(GeneratedToken) -> Result<GenerationControl>,
     {
         let prompt_token_ids = token_ids_to_u32(&prepared.input_ids);
         let max_sequence_length = prepared.input_ids.len() + max_tokens as usize;
         let mut runner = ModelRunner::new(self.clone(), max_sequence_length, prepared)?;
-        let mut decoder =
-            Detokenizer::from_tokenizer(&self.inner.tokenizer, &prepared.stop_token_ids);
         let mut step_tokens = prompt_token_ids;
 
-        let mut completion_tokens = 0u32;
+        let mut output_tokens = Vec::new();
         let mut termination = GenerationTermination::MaxTokens;
         for _ in 0..max_tokens {
             let Some((token, next_input_token)) = runner.generate_next_token(&step_tokens)? else {
                 termination = GenerationTermination::Stop;
                 break;
             };
-
-            let delta = decoder.push_tokens(&[token])?;
-            if decoder.is_stopped() {
+            if prepared.stop_token_ids.contains(&token) {
                 termination = GenerationTermination::Stop;
                 break;
             }
 
-            completion_tokens += 1;
-            if !delta.is_empty() {
-                on_text_delta(&delta)?;
+            let position = u32::try_from(output_tokens.len() + 1).unwrap_or(u32::MAX);
+            output_tokens.push(next_input_token);
+            if matches!(
+                on_token(GeneratedToken {
+                    position,
+                    token_id: next_input_token,
+                })?,
+                GenerationControl::Cancel
+            ) {
+                termination = GenerationTermination::Cancelled;
+                break;
             }
 
             if runner.use_kv_cache {
@@ -291,10 +369,40 @@ impl ModelEngine {
         }
 
         Ok(GenerationOutput {
-            text: decoder.finish(),
             prompt_tokens: prepared.input_ids.len() as u32,
-            completion_tokens,
+            output_tokens,
             termination,
+        })
+    }
+
+    /// Runs greedy local generation and streams decoded text deltas.
+    pub fn generate_text_from_prepared<F>(
+        &self,
+        prepared: &PreparedPrompt,
+        max_tokens: u32,
+        mut on_text_delta: F,
+    ) -> Result<TextGenerationOutput>
+    where
+        F: FnMut(&str) -> Result<GenerationControl>,
+    {
+        let mut decoder =
+            Detokenizer::from_tokenizer(&self.inner.tokenizer, &prepared.stop_token_ids);
+        let tokens = self.generate_tokens_from_prepared(prepared, max_tokens, |token| {
+            let token_id = i32::try_from(token.token_id).map_err(|_| {
+                LLMError::InvalidModelConfig(format!(
+                    "generated token id {} exceeds i32 range",
+                    token.token_id
+                ))
+            })?;
+            let delta = decoder.push_tokens(&[token_id])?;
+            if delta.is_empty() {
+                return Ok(GenerationControl::Continue);
+            }
+            on_text_delta(&delta)
+        })?;
+        Ok(TextGenerationOutput {
+            text: decoder.finish(),
+            tokens,
         })
     }
 

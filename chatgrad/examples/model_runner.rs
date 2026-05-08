@@ -1,5 +1,5 @@
 use catgrad::prelude::Dtype;
-use chatgrad::run::ModelEngine;
+use chatgrad::run::{GenerationControl, ModelEngine};
 use chatgrad::types::Message;
 use chatgrad::types::openai::ChatMessage;
 use std::io::Write;
@@ -11,10 +11,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let system_message = Message::openai(ChatMessage::system("You are a helpful chat assistant"));
     let user_message = Message::openai(ChatMessage::user("What is 2+2?"));
     let prompt = engine.prepare_messages(&[system_message.clone(), user_message])?;
-    engine.generate_from_prepared(&prompt, 128, |delta| {
+    engine.generate_text_from_prepared(&prompt, 128, |delta| {
         print!("{delta}");
         let _ = std::io::stdout().flush();
-        Ok(())
+        Ok(GenerationControl::Continue)
     })?;
 
     ////////////////////////////////////////////////////////////////////////////
@@ -25,10 +25,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Change the context history and
     let user_message = Message::openai(ChatMessage::user("What is 4+4?"));
     let prompt = engine.prepare_messages(&[system_message, user_message])?;
-    engine.generate_from_prepared(&prompt, 128, |delta| {
+    engine.generate_text_from_prepared(&prompt, 128, |delta| {
         print!("{delta}");
         let _ = std::io::stdout().flush();
-        Ok(())
+        Ok(GenerationControl::Continue)
     })?;
 
     Ok(())

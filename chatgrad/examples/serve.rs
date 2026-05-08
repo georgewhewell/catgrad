@@ -11,7 +11,7 @@ use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 use catgrad_llm::LLMError;
 use catgrad_llm::utils::from_json_slice;
-use chatgrad::run::ModelEngine;
+use chatgrad::run::{GenerationControl, ModelEngine};
 use chatgrad::types::{anthropic, openai, plain};
 
 // Known limitations of this demo server:
@@ -269,7 +269,7 @@ fn serve_openai(request: Request, engine: &InferenceEngine, req: openai::ChatCom
                 .build();
             sse.send_data(&start_chunk)?;
 
-            let generated = engine.engine.generate_from_prepared(
+            let generated = engine.engine.generate_text_from_prepared(
                 &prepared,
                 max_tokens.unwrap_or(engine.default_max_tokens),
                 |delta| {
@@ -289,7 +289,7 @@ fn serve_openai(request: Request, engine: &InferenceEngine, req: openai::ChatCom
                         ])
                         .build();
                     sse.send_data(&chunk).map_err(std::io::Error::other)?;
-                    Ok(())
+                    Ok(GenerationControl::Continue)
                 },
             )?;
 
@@ -302,7 +302,7 @@ fn serve_openai(request: Request, engine: &InferenceEngine, req: openai::ChatCom
                     openai::ChatStreamChoice::builder()
                         .index(0)
                         .delta(openai::ChatDelta::default())
-                        .finish_reason(Some(generated.termination.into()))
+                        .finish_reason(Some(generated.termination().into()))
                         .build(),
                 ])
                 .build();
@@ -316,8 +316,8 @@ fn serve_openai(request: Request, engine: &InferenceEngine, req: openai::ChatCom
                     .model(model)
                     .choices(vec![])
                     .usage(Some(openai::Usage::from_counts(
-                        generated.prompt_tokens,
-                        generated.completion_tokens,
+                        generated.prompt_tokens(),
+                        generated.completion_tokens(),
                     )))
                     .build();
                 sse.send_data(&usage_chunk)?;
@@ -329,10 +329,10 @@ fn serve_openai(request: Request, engine: &InferenceEngine, req: openai::ChatCom
         return;
     }
 
-    let generated = match engine.engine.generate_from_prepared(
+    let generated = match engine.engine.generate_text_from_prepared(
         &prepared,
         max_tokens.unwrap_or(engine.default_max_tokens),
-        |_| Ok(()),
+        |_| Ok(GenerationControl::Continue),
     ) {
         Ok(out) => out,
         Err(err) => {
@@ -349,13 +349,13 @@ fn serve_openai(request: Request, engine: &InferenceEngine, req: openai::ChatCom
         .choices(vec![
             openai::ChatChoice::builder()
                 .index(0)
-                .message(openai::ChatMessage::assistant(generated.text))
-                .finish_reason(Some(generated.termination.into()))
+                .message(openai::ChatMessage::assistant(generated.text.clone()))
+                .finish_reason(Some(generated.termination().into()))
                 .build(),
         ])
         .usage(Some(openai::Usage::from_counts(
-            generated.prompt_tokens,
-            generated.completion_tokens,
+            generated.prompt_tokens(),
+            generated.completion_tokens(),
         )))
         .build();
 
@@ -402,7 +402,7 @@ fn serve_anthropic(request: Request, engine: &InferenceEngine, req: &anthropic::
             let generated =
                 engine
                     .engine
-                    .generate_from_prepared(&prepared, max_tokens, |delta| {
+                    .generate_text_from_prepared(&prepared, max_tokens, |delta| {
                         let event = anthropic::MessageStreamEvent::ContentBlockDelta {
                             index: 0,
                             delta: anthropic::ContentBlockDelta::TextDelta {
@@ -411,7 +411,7 @@ fn serve_anthropic(request: Request, engine: &InferenceEngine, req: &anthropic::
                         };
                         sse.send_event_data("content_block_delta", &event)
                             .map_err(std::io::Error::other)?;
-                        Ok(())
+                        Ok(GenerationControl::Continue)
                     })?;
 
             sse.send_event_data(
@@ -421,11 +421,11 @@ fn serve_anthropic(request: Request, engine: &InferenceEngine, req: &anthropic::
 
             let message_delta = anthropic::MessageStreamEvent::MessageDelta {
                 delta: anthropic::StreamMessageDelta {
-                    stop_reason: Some(generated.termination.into()),
+                    stop_reason: Some(generated.termination().into()),
                 },
                 usage: anthropic::AnthropicUsage::new(
-                    generated.prompt_tokens,
-                    generated.completion_tokens,
+                    generated.prompt_tokens(),
+                    generated.completion_tokens(),
                 ),
             };
             sse.send_event_data("message_delta", &message_delta)?;
@@ -437,7 +437,7 @@ fn serve_anthropic(request: Request, engine: &InferenceEngine, req: &anthropic::
 
     let generated = match engine
         .engine
-        .generate_from_prepared(&prepared, max_tokens, |_| Ok(()))
+        .generate_text_from_prepared(&prepared, max_tokens, |_| Ok(GenerationControl::Continue))
     {
         Ok(out) => out,
         Err(err) => {
@@ -451,13 +451,13 @@ fn serve_anthropic(request: Request, engine: &InferenceEngine, req: &anthropic::
         .message_type(Some("message".to_string()))
         .role("assistant".to_string())
         .content(vec![anthropic::ContentBlock::Text {
-            text: generated.text,
+            text: generated.text.clone(),
         }])
         .model(model)
-        .stop_reason(Some(generated.termination.into()))
+        .stop_reason(Some(generated.termination().into()))
         .usage(anthropic::AnthropicUsage::new(
-            generated.prompt_tokens,
-            generated.completion_tokens,
+            generated.prompt_tokens(),
+            generated.completion_tokens(),
         ))
         .build();
 
@@ -484,7 +484,7 @@ fn serve_plain(request: Request, engine: &InferenceEngine, req: &plain::Completi
             let id = next_id("cmpl");
             let created = now_unix();
 
-            let generated = engine.engine.generate_from_prepared(
+            let generated = engine.engine.generate_text_from_prepared(
                 &input,
                 max_tokens.unwrap_or(engine.default_max_tokens),
                 |delta| {
@@ -501,7 +501,7 @@ fn serve_plain(request: Request, engine: &InferenceEngine, req: &plain::Completi
                         ])
                         .build();
                     sse.send_data(&chunk).map_err(std::io::Error::other)?;
-                    Ok(())
+                    Ok(GenerationControl::Continue)
                 },
             )?;
 
@@ -514,7 +514,7 @@ fn serve_plain(request: Request, engine: &InferenceEngine, req: &plain::Completi
                     plain::CompletionChoice::builder()
                         .index(0)
                         .text(String::new())
-                        .finish_reason(Some(generated.termination.into()))
+                        .finish_reason(Some(generated.termination().into()))
                         .build(),
                 ])
                 .build();
@@ -525,10 +525,10 @@ fn serve_plain(request: Request, engine: &InferenceEngine, req: &plain::Completi
         return;
     }
 
-    let generated = match engine.engine.generate_from_prepared(
+    let generated = match engine.engine.generate_text_from_prepared(
         &input,
         max_tokens.unwrap_or(engine.default_max_tokens),
-        |_| Ok(()),
+        |_| Ok(GenerationControl::Continue),
     ) {
         Ok(out) => out,
         Err(err) => {
@@ -548,13 +548,13 @@ fn serve_plain(request: Request, engine: &InferenceEngine, req: &plain::Completi
         .choices(vec![
             plain::CompletionChoice::builder()
                 .index(0)
-                .text(generated.text)
-                .finish_reason(Some(generated.termination.into()))
+                .text(generated.text.clone())
+                .finish_reason(Some(generated.termination().into()))
                 .build(),
         ])
         .usage(Some(openai::Usage::from_counts(
-            generated.prompt_tokens,
-            generated.completion_tokens,
+            generated.prompt_tokens(),
+            generated.completion_tokens(),
         )))
         .build();
 
