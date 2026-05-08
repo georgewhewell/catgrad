@@ -303,10 +303,11 @@ fn insert_tensor_value<B: interpreter::Backend, T: interpreter::IntoTagged<B, 1>
     data_map: &mut BTreeMap<catgrad::prelude::Path, interpreter::TaggedTensor<B>>,
     type_map: &mut BTreeMap<catgrad::prelude::Path, typecheck::Type>,
 ) -> Result<()> {
-    let tensor = interpreter::TaggedTensor::from_vec(backend, data, interpreter::Shape(shape.clone()))
-        .map_err(|err| {
-            LLMError::InvalidModelConfig(format!("failed to create tensor {key}: {err:?}"))
-        })?;
+    let tensor =
+        interpreter::TaggedTensor::from_vec(backend, data, interpreter::Shape(shape.clone()))
+            .map_err(|err| {
+                LLMError::InvalidModelConfig(format!("failed to create tensor {key}: {err:?}"))
+            })?;
     data_map.insert(key.clone(), tensor);
     insert_tensor_type(key, shape, dtype, type_map);
     Ok(())
