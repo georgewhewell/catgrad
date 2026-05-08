@@ -8,7 +8,7 @@ use std::marker::PhantomData;
 
 const SOURCE_INPUT_SCHEMA: &str = "catnix.source.input.v1";
 const SOURCE_OUTPUT_SCHEMA: &str = "catnix.source.output.v1";
-const TEXT_INPUT_SCHEMA: &str = "catnix.text.input.v1";
+const TOKEN_IDS_SCHEMA: &str = "catnix.token_ids.v1";
 const TEXT_POLICY_SCHEMA: &str = "catnix.text.policy.v1";
 const TEXT_EXECUTION_SCHEMA: &str = "catnix.text.execution.v1";
 const TEXT_ARTIFACT_IDENTITY_SCHEMA: &str = "catnix.text.artifact.identity.v1";
@@ -203,6 +203,14 @@ pub enum SourceRef<I: InputAddressed> {
 }
 
 impl<I: InputAddressed> SourceRef<I> {
+    pub const fn input(id: InputId<I>) -> Self {
+        Self::Input(id)
+    }
+
+    pub const fn output(id: OutputId<I::Artifact>) -> Self {
+        Self::Output(id)
+    }
+
     fn encode(&self, encoder: &mut DagCborEncoder) {
         match self {
             Self::Input(id) => {
@@ -223,44 +231,147 @@ impl<I: InputAddressed> SourceRef<I> {
 pub struct BoundTerm;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Tensor;
+pub struct TextState;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct StateBundle;
+pub type BoundTermId = OutputId<BoundTerm>;
+pub type TokenIdsId = OutputId<TokenIds>;
+pub type TextPolicyId = OutputId<TextPolicy>;
+pub type TextExecutionId = InputId<TextExecution>;
+pub type TextArtifactId = OutputId<TextArtifact>;
+pub type TextStateId = OutputId<TextState>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TokenId(u32);
+
+impl TokenId {
+    pub const fn new(id: u32) -> Self {
+        Self(id)
+    }
+
+    pub const fn as_u32(self) -> u32 {
+        self.0
+    }
+}
+
+impl From<u32> for TokenId {
+    fn from(value: u32) -> Self {
+        Self::new(value)
+    }
+}
+
+impl std::fmt::Display for TokenId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl TryFrom<i32> for TokenId {
+    type Error = TokenIdError;
+
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        match u32::try_from(value) {
+            Ok(value) => Ok(Self(value)),
+            Err(_) => Err(TokenIdError { value }),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TokenIdError {
+    value: i32,
+}
+
+impl TokenIdError {
+    pub const fn value(self) -> i32 {
+        self.value
+    }
+}
+
+impl std::fmt::Display for TokenIdError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "token id {} is negative", self.value)
+    }
+}
+
+impl std::error::Error for TokenIdError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TextInput {
-    tokens: OutputId<Tensor>,
+pub struct TokenIds {
+    tokens: Vec<TokenId>,
 }
 
-impl TextInput {
-    pub const fn new(tokens: OutputId<Tensor>) -> Self {
-        Self { tokens }
+impl TokenIds {
+    pub fn new(tokens: impl Into<Vec<TokenId>>) -> Self {
+        Self {
+            tokens: tokens.into(),
+        }
     }
 
-    pub const fn tokens(&self) -> OutputId<Tensor> {
-        self.tokens
+    pub fn from_u32s(tokens: impl IntoIterator<Item = u32>) -> Self {
+        Self {
+            tokens: tokens.into_iter().map(TokenId::new).collect(),
+        }
+    }
+
+    pub fn as_slice(&self) -> &[TokenId] {
+        &self.tokens
+    }
+
+    pub fn len(&self) -> usize {
+        self.tokens.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tokens.is_empty()
     }
 }
 
-impl Canonical for TextInput {
+impl<const N: usize> From<[u32; N]> for TokenIds {
+    fn from(value: [u32; N]) -> Self {
+        Self::from_u32s(value)
+    }
+}
+
+impl From<Vec<u32>> for TokenIds {
+    fn from(value: Vec<u32>) -> Self {
+        Self::from_u32s(value)
+    }
+}
+
+impl FromIterator<TokenId> for TokenIds {
+    fn from_iter<T: IntoIterator<Item = TokenId>>(iter: T) -> Self {
+        Self::new(iter.into_iter().collect::<Vec<_>>())
+    }
+}
+
+impl FromIterator<u32> for TokenIds {
+    fn from_iter<T: IntoIterator<Item = u32>>(iter: T) -> Self {
+        Self::from_u32s(iter)
+    }
+}
+
+impl Canonical for TokenIds {
     fn encode(&self, encoder: &mut DagCborEncoder) {
         encoder.array(2);
-        encoder.str(TEXT_INPUT_SCHEMA);
-        encoder.bytes(self.tokens.as_bytes());
+        encoder.str(TOKEN_IDS_SCHEMA);
+        encoder.array(self.tokens.len() as u64);
+        for token in &self.tokens {
+            encoder.u64(token.as_u32() as u64);
+        }
     }
 }
 
-impl OutputAddressed for TextInput {}
+impl OutputAddressed for TokenIds {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextPolicy {
     max_new_tokens: u32,
-    stop_token_ids: Vec<i32>,
+    stop_token_ids: Vec<TokenId>,
 }
 
 impl TextPolicy {
-    pub fn new(max_new_tokens: u32, mut stop_token_ids: Vec<i32>) -> Self {
+    pub fn new(max_new_tokens: u32, stop_token_ids: impl IntoIterator<Item = TokenId>) -> Self {
+        let mut stop_token_ids: Vec<_> = stop_token_ids.into_iter().collect();
         stop_token_ids.sort_unstable();
         stop_token_ids.dedup();
         Self {
@@ -269,11 +380,18 @@ impl TextPolicy {
         }
     }
 
+    pub fn from_u32_stop_tokens(
+        max_new_tokens: u32,
+        stop_token_ids: impl IntoIterator<Item = u32>,
+    ) -> Self {
+        Self::new(max_new_tokens, stop_token_ids.into_iter().map(TokenId::new))
+    }
+
     pub const fn max_new_tokens(&self) -> u32 {
         self.max_new_tokens
     }
 
-    pub fn stop_token_ids(&self) -> &[i32] {
+    pub fn stop_token_ids(&self) -> &[TokenId] {
         &self.stop_token_ids
     }
 }
@@ -285,7 +403,7 @@ impl Canonical for TextPolicy {
         encoder.u64(self.max_new_tokens as u64);
         encoder.array(self.stop_token_ids.len() as u64);
         for token in &self.stop_token_ids {
-            encoder.i64(*token as i64);
+            encoder.u64(token.as_u32() as u64);
         }
     }
 }
@@ -297,19 +415,15 @@ pub type TextSource = SourceRef<TextExecution>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextExecution {
     from: TextSource,
-    input: OutputId<TextInput>,
-    policy: OutputId<TextPolicy>,
+    prompt_tokens: TokenIdsId,
+    policy: TextPolicyId,
 }
 
 impl TextExecution {
-    pub const fn new(
-        from: TextSource,
-        input: OutputId<TextInput>,
-        policy: OutputId<TextPolicy>,
-    ) -> Self {
+    pub const fn new(from: TextSource, prompt_tokens: TokenIdsId, policy: TextPolicyId) -> Self {
         Self {
             from,
-            input,
+            prompt_tokens,
             policy,
         }
     }
@@ -318,11 +432,11 @@ impl TextExecution {
         &self.from
     }
 
-    pub const fn input(&self) -> OutputId<TextInput> {
-        self.input
+    pub const fn prompt_tokens(&self) -> TokenIdsId {
+        self.prompt_tokens
     }
 
-    pub const fn policy(&self) -> OutputId<TextPolicy> {
+    pub const fn policy(&self) -> TextPolicyId {
         self.policy
     }
 }
@@ -332,7 +446,7 @@ impl Canonical for TextExecution {
         encoder.array(4);
         encoder.str(TEXT_EXECUTION_SCHEMA);
         self.from.encode(encoder);
-        encoder.bytes(self.input.as_bytes());
+        encoder.bytes(self.prompt_tokens.as_bytes());
         encoder.bytes(self.policy.as_bytes());
     }
 }
@@ -342,44 +456,29 @@ impl InputAddressed for TextExecution {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TextIdentity {
-    bound_term: OutputId<BoundTerm>,
-}
-
-impl TextIdentity {
-    pub const fn new(bound_term: OutputId<BoundTerm>) -> Self {
-        Self { bound_term }
-    }
-
-    pub const fn bound_term(&self) -> OutputId<BoundTerm> {
-        self.bound_term
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextOutput {
-    execution: InputId<TextExecution>,
+    execution: TextExecutionId,
     position: u64,
-    state: OutputId<StateBundle>,
-    output_tokens: OutputId<Tensor>,
+    state: TextStateId,
+    generated_tokens: TokenIdsId,
 }
 
 impl TextOutput {
     pub const fn new(
-        execution: InputId<TextExecution>,
+        execution: TextExecutionId,
         position: u64,
-        state: OutputId<StateBundle>,
-        output_tokens: OutputId<Tensor>,
+        state: TextStateId,
+        generated_tokens: TokenIdsId,
     ) -> Self {
         Self {
             execution,
             position,
             state,
-            output_tokens,
+            generated_tokens,
         }
     }
 
-    pub const fn execution(&self) -> InputId<TextExecution> {
+    pub const fn execution(&self) -> TextExecutionId {
         self.execution
     }
 
@@ -387,28 +486,48 @@ impl TextOutput {
         self.position
     }
 
-    pub const fn state(&self) -> OutputId<StateBundle> {
+    pub const fn state(&self) -> TextStateId {
         self.state
     }
 
-    pub const fn output_tokens(&self) -> OutputId<Tensor> {
-        self.output_tokens
+    pub const fn generated_tokens(&self) -> TokenIdsId {
+        self.generated_tokens
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TextArtifact {
-    Identity(TextIdentity),
+    Identity { bound_term: BoundTermId },
     Output(TextOutput),
+}
+
+impl TextArtifact {
+    pub const fn identity(bound_term: BoundTermId) -> Self {
+        Self::Identity { bound_term }
+    }
+
+    pub const fn output(
+        execution: TextExecutionId,
+        position: u64,
+        state: TextStateId,
+        generated_tokens: TokenIdsId,
+    ) -> Self {
+        Self::Output(TextOutput::new(
+            execution,
+            position,
+            state,
+            generated_tokens,
+        ))
+    }
 }
 
 impl Canonical for TextArtifact {
     fn encode(&self, encoder: &mut DagCborEncoder) {
         match self {
-            Self::Identity(identity) => {
+            Self::Identity { bound_term } => {
                 encoder.array(2);
                 encoder.str(TEXT_ARTIFACT_IDENTITY_SCHEMA);
-                encoder.bytes(identity.bound_term.as_bytes());
+                encoder.bytes(bound_term.as_bytes());
             }
             Self::Output(output) => {
                 encoder.array(5);
@@ -416,7 +535,7 @@ impl Canonical for TextArtifact {
                 encoder.bytes(output.execution.as_bytes());
                 encoder.u64(output.position);
                 encoder.bytes(output.state.as_bytes());
-                encoder.bytes(output.output_tokens.as_bytes());
+                encoder.bytes(output.generated_tokens.as_bytes());
             }
         }
     }
@@ -493,8 +612,8 @@ impl Default for DagCborEncoder {
 #[cfg(test)]
 mod tests {
     use super::{
-        BoundTerm, InputAddressed, OutputAddressed, OutputId, SourceRef, StateBundle, Tensor,
-        TextArtifact, TextExecution, TextIdentity, TextInput, TextOutput, TextPolicy,
+        BoundTerm, InputAddressed, OutputAddressed, OutputId, SourceRef, TextArtifact,
+        TextExecution, TextPolicy, TextState, TokenId, TokenIds,
     };
 
     fn output_id<T>(byte: u8) -> OutputId<T> {
@@ -502,19 +621,44 @@ mod tests {
     }
 
     #[test]
+    fn token_ids_are_output_addressed_values() {
+        let a = TokenIds::from([1, 2, 3]);
+        let b = TokenIds::from([1, 2, 3]);
+        let c = TokenIds::from([3, 2, 1]);
+
+        assert_eq!(
+            a.as_slice(),
+            &[TokenId::new(1), TokenId::new(2), TokenId::new(3)]
+        );
+        assert_eq!(a.output_id(), b.output_id());
+        assert_ne!(a.output_id(), c.output_id());
+    }
+
+    #[test]
+    fn negative_model_token_ids_are_rejected_at_the_boundary() {
+        assert_eq!(TokenId::try_from(7_i32).unwrap(), TokenId::new(7));
+        let err = TokenId::try_from(-1_i32).unwrap_err();
+        assert_eq!(err.value(), -1);
+    }
+
+    #[test]
     fn policy_canonicalizes_stop_ids() {
-        let a = TextPolicy::new(16, vec![2, 1, 2]);
-        let b = TextPolicy::new(16, vec![1, 2]);
-        assert_eq!(a.stop_token_ids(), &[1, 2]);
+        let a = TextPolicy::from_u32_stop_tokens(16, [2, 1, 2]);
+        let b = TextPolicy::from_u32_stop_tokens(16, [1, 2]);
+        assert_eq!(a.stop_token_ids(), &[TokenId::new(1), TokenId::new(2)]);
         assert_eq!(a.output_id(), b.output_id());
     }
 
     #[test]
     fn identity_is_output_addressed_genesis() {
-        let identity = TextArtifact::Identity(TextIdentity::new(output_id::<BoundTerm>(7)));
-        let input = TextInput::new(output_id::<Tensor>(1)).output_id();
-        let policy = TextPolicy::new(4, vec![]).output_id();
-        let execution = TextExecution::new(SourceRef::Output(identity.output_id()), input, policy);
+        let identity = TextArtifact::identity(output_id::<BoundTerm>(7));
+        let prompt_tokens = TokenIds::from([1]).output_id();
+        let policy = TextPolicy::from_u32_stop_tokens(4, []).output_id();
+        let execution = TextExecution::new(
+            SourceRef::output(identity.output_id()),
+            prompt_tokens,
+            policy,
+        );
 
         assert_ne!(
             execution.input_id().as_bytes(),
@@ -524,37 +668,39 @@ mod tests {
 
     #[test]
     fn execution_input_id_changes_when_source_changes() {
-        let identity = TextArtifact::Identity(TextIdentity::new(output_id::<BoundTerm>(7)));
-        let input = TextInput::new(output_id::<Tensor>(1)).output_id();
-        let policy = TextPolicy::new(4, vec![]).output_id();
-        let first = TextExecution::new(SourceRef::Output(identity.output_id()), input, policy);
-        let second = TextExecution::new(SourceRef::Input(first.input_id()), input, policy);
+        let identity = TextArtifact::identity(output_id::<BoundTerm>(7));
+        let prompt_tokens = TokenIds::from([1]).output_id();
+        let policy = TextPolicy::from_u32_stop_tokens(4, []).output_id();
+        let first = TextExecution::new(
+            SourceRef::output(identity.output_id()),
+            prompt_tokens,
+            policy,
+        );
+        let second = TextExecution::new(SourceRef::input(first.input_id()), prompt_tokens, policy);
 
         assert_ne!(first.input_id(), second.input_id());
     }
 
     #[test]
-    fn output_artifact_id_changes_when_tokens_change() {
+    fn output_artifact_id_changes_when_generated_tokens_change() {
         let execution = TextExecution::new(
-            SourceRef::Output(
-                TextArtifact::Identity(TextIdentity::new(output_id::<BoundTerm>(7))).output_id(),
-            ),
-            TextInput::new(output_id::<Tensor>(1)).output_id(),
-            TextPolicy::new(4, vec![]).output_id(),
+            SourceRef::output(TextArtifact::identity(output_id::<BoundTerm>(7)).output_id()),
+            TokenIds::from([1]).output_id(),
+            TextPolicy::from_u32_stop_tokens(4, []).output_id(),
         )
         .input_id();
-        let a = TextArtifact::Output(TextOutput::new(
+        let a = TextArtifact::output(
             execution,
             5,
-            output_id::<StateBundle>(8),
-            output_id::<Tensor>(1),
-        ));
-        let b = TextArtifact::Output(TextOutput::new(
+            output_id::<TextState>(8),
+            TokenIds::from([1]).output_id(),
+        );
+        let b = TextArtifact::output(
             execution,
             5,
-            output_id::<StateBundle>(8),
-            output_id::<Tensor>(2),
-        ));
+            output_id::<TextState>(8),
+            TokenIds::from([2]).output_id(),
+        );
 
         assert_ne!(a.output_id(), b.output_id());
     }
