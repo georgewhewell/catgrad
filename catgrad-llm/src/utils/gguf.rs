@@ -1250,9 +1250,7 @@ pub fn load_gguf_weights(
             let shape = tensor_info.shape.dims().to_vec();
             data_map.insert(
                 key.clone(),
-                catgrad::interpreter::Value::Tensor(
-                    backend.tagged_tensor_from_qtensor(qtensor, dtype),
-                ),
+                backend.tagged_tensor_from_qtensor(qtensor, dtype),
             );
             let tensor_type = catgrad::typecheck::Type::Tensor(
                 catgrad::typecheck::TypeExpr::NdArrayType(catgrad::typecheck::NdArrayType {
@@ -1271,17 +1269,15 @@ pub fn load_gguf_weights(
                 let lm_head_key = gguf_tied_lm_head_path(&architecture)?;
                 data_map.insert(
                     lm_head_key.clone(),
-                    catgrad::interpreter::Value::Tensor(
-                        backend.tagged_tensor_from_qtensor(
-                            content
-                                .tensor(&mut file, name, backend.device())
-                                .map_err(|err| {
-                                    LLMError::InvalidModelConfig(format!(
-                                        "failed to reread GGUF tensor `{name}`: {err}"
-                                    ))
-                                })?,
-                            dtype,
-                        ),
+                    backend.tagged_tensor_from_qtensor(
+                        content
+                            .tensor(&mut file, name, backend.device())
+                            .map_err(|err| {
+                                LLMError::InvalidModelConfig(format!(
+                                    "failed to reread GGUF tensor `{name}`: {err}"
+                                ))
+                            })?,
+                        dtype,
                     ),
                 );
                 let tensor_type = catgrad::typecheck::Type::Tensor(
@@ -1395,10 +1391,7 @@ pub fn load_gguf_weights(
         }
 
         let shape = tensor.dims().to_vec();
-        data_map.insert(
-            key.clone(),
-            catgrad::interpreter::Value::Tensor(backend.tagged_tensor_from_tensor(tensor)),
-        );
+        data_map.insert(key.clone(), backend.tagged_tensor_from_tensor(tensor));
         let tensor_type = catgrad::typecheck::Type::Tensor(
             catgrad::typecheck::TypeExpr::NdArrayType(catgrad::typecheck::NdArrayType {
                 dtype: catgrad::typecheck::DtypeExpr::Constant(tensor_dtype),
@@ -1416,17 +1409,15 @@ pub fn load_gguf_weights(
             let lm_head_key = gguf_tied_lm_head_path(&architecture)?;
             data_map.insert(
                 lm_head_key.clone(),
-                catgrad::interpreter::Value::Tensor(
-                    backend.tagged_tensor_from_qtensor(
-                        content
-                            .tensor(&mut file, name, backend.device())
-                            .map_err(|err| {
-                                LLMError::InvalidModelConfig(format!(
-                                    "failed to reread GGUF tensor `{name}`: {err}"
-                                ))
-                            })?,
-                        dtype,
-                    ),
+                backend.tagged_tensor_from_qtensor(
+                    content
+                        .tensor(&mut file, name, backend.device())
+                        .map_err(|err| {
+                            LLMError::InvalidModelConfig(format!(
+                                "failed to reread GGUF tensor `{name}`: {err}"
+                            ))
+                        })?,
+                    dtype,
                 ),
             );
             let tensor_type = catgrad::typecheck::Type::Tensor(
