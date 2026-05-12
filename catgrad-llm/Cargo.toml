@@ -49,5 +49,6 @@ test-log = "0.2.17"
 catgrad = {path = "../catgrad", features=["ndarray-backend", "candle-backend", "svg", "serde"]}
 anyhow = "1.0.99"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
-tokio = { version = "1", default-features = false, features = ["rt", "macros", "net", "sync"] }
+tokio = { version = "1", default-features = false, features = ["rt", "macros", "net", "sync", "process"] }
 tokio-stream = { version = "0.1", default-features = false }
+libc = "0.2"

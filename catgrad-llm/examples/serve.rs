@@ -53,6 +53,23 @@ struct Args {
     /// Fallback max new tokens when request omits max_tokens
     #[arg(long, default_value_t = 128)]
     default_max_tokens: u32,
+
+    /// Wrap a child command with this server as its OpenAI/Anthropic
+    /// backend. Sets `OPENAI_BASE_URL` and `ANTHROPIC_BASE_URL` on the
+    /// child's environment so SDKs pointed at the standard env vars
+    /// route through here. Everything after `--wrap` is consumed as
+    /// the child command and its arguments, so `--wrap` must come last
+    /// on the serve command line.
+    ///
+    /// Example: `serve --port 8080 --wrap claude --system-prompt yo`.
+    #[arg(
+        long = "wrap",
+        value_name = "CMD",
+        num_args = 1..,
+        trailing_var_arg = true,
+        allow_hyphen_values = true,
+    )]
+    wrap: Vec<String>,
 }
 
 /// SSE events flow back as `Result<Event, Infallible>` so the receiver
@@ -459,15 +476,98 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn serve(args: Args, jobs: mpsc::UnboundedSender<Job>) -> anyhow::Result<()> {
+    use std::future::IntoFuture;
+
     let app = Router::new()
         .route("/v1/chat/completions", post(handle_openai))
         .route("/v1/messages", post(handle_anthropic))
         .with_state(AppState { jobs });
     let addr = format!("{}:{}", args.host, args.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    println!("catgrad demo API server listening on http://{addr}");
+    let bound = listener.local_addr()?;
+    println!("catgrad demo API server listening on http://{bound}");
     println!("POST /v1/chat/completions (OpenAI)");
     println!("POST /v1/messages (Anthropic)");
-    axum::serve(listener, app).await?;
+
+    let wrap_child = match args.wrap.split_first() {
+        Some((cmd, cmd_args)) => {
+            // Wrapped commands talk over loopback, so an unspecified
+            // bind (0.0.0.0 / ::) becomes 127.0.0.1 in the URLs they see.
+            let host = if bound.ip().is_unspecified() {
+                "127.0.0.1".to_string()
+            } else {
+                bound.ip().to_string()
+            };
+            let base = format!("http://{host}:{}", bound.port());
+            println!("wrapping `{cmd}` with gateway base {base}");
+            Some(spawn_wrapped(cmd, cmd_args, &base)?)
+        }
+        None => None,
+    };
+
+    let server = axum::serve(listener, app).into_future();
+    match wrap_child {
+        Some(mut child) => {
+            tokio::pin!(server);
+            tokio::select! {
+                // Server stopped first (bind error or process signal):
+                // dropping `child` triggers kill_on_drop so the wrapped
+                // command tears down too.
+                res = &mut server => res?,
+                // Wrapped command exited first: drop the server (its
+                // future is dropped when we leave this scope) and
+                // surface a non-zero exit as an error.
+                status = child.wait() => {
+                    let status = status?;
+                    if !status.success() {
+                        anyhow::bail!("wrapped command exited with status {status}");
+                    }
+                }
+            }
+        }
+        None => server.await?,
+    }
     Ok(())
+}
+
+fn spawn_wrapped(
+    cmd: &str,
+    args: &[String],
+    base_url: &str,
+) -> anyhow::Result<tokio::process::Child> {
+    use anyhow::Context;
+    use tokio::process::Command;
+    let mut command = Command::new(cmd);
+    command
+        .args(args)
+        .env("OPENAI_BASE_URL", format!("{base_url}/v1"))
+        .env("ANTHROPIC_BASE_URL", base_url)
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .kill_on_drop(true);
+
+    // PR_SET_PDEATHSIG: if the gateway dies (panic / SIGKILL), the
+    // kernel delivers SIGTERM to the wrapped child instead of leaving
+    // it as an orphan. Linux-only; on macOS/BSD `kill_on_drop` is the
+    // only safety net.
+    #[cfg(target_os = "linux")]
+    unsafe {
+        command.pre_exec(|| {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM as libc::c_ulong) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // Race window: if the parent already died between fork and
+            // prctl, the signal will never fire. Re-check and bail if
+            // we're already reparented to init.
+            if libc::getppid() == 1 {
+                libc::_exit(0);
+            }
+            Ok(())
+        });
+    }
+
+    command
+        .spawn()
+        .with_context(|| format!("failed to spawn `{cmd}`"))
 }
